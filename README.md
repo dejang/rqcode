@@ -8,12 +8,34 @@ It runs as a fast single-binary CLI (with text and JSON output) or as an embedda
 
 ---
 
-## Installation & Quick Start
+## Installation
+
+### Prebuilt binary (macOS — Apple Silicon & Intel)
+
+Install without the Rust/Cargo toolchain:
 
 ```bash
-# Install from crates.io
-cargo install rqcode
+curl -fsSL https://github.com/dejang/rqcode/releases/latest/download/install.sh | sh
+```
 
+The installer verifies the SHA-256 checksum and places `rqcode` in `~/.local/bin` by default. You can customize the destination or pin a release with environment variables:
+
+```bash
+curl -fsSL https://github.com/dejang/rqcode/releases/latest/download/install.sh \
+  | RQCODE_INSTALL_DIR=/usr/local/bin RQCODE_VERSION=v0.1.0 sh
+```
+
+### Via Cargo (all platforms)
+
+```bash
+cargo install rqcode
+```
+
+---
+
+## Quick Start
+
+```bash
 # Check the current repository
 rqcode check .
 
