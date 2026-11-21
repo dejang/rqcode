@@ -1,0 +1,7 @@
+rules = ["test-coupling"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/engine.rs"
+message_contains = "dump_internal_cache"
+related_files = ["src/engine.rs"]

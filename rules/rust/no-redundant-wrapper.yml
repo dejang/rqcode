@@ -1,0 +1,324 @@
+id: no-redundant-wrapper
+language: rust
+severity: error
+message: "Wrapper `$NAME` only forwards to sibling `$TARGET`. Remove this redundant wrapper and call `$TARGET` directly."
+note: "Checks public or restricted-visibility functions and inherent methods whose body is a single direct call forwarding all parameters (optionally with default/constant arguments) to an equally or more visible sibling in the same scope."
+labels:
+  NAME:
+    style: primary
+utils:
+  comment:
+    any:
+      - kind: line_comment
+      - kind: block_comment
+  module-scope:
+    any:
+      - kind: source_file
+      - kind: declaration_list
+        inside:
+          kind: mod_item
+  inherent-impl-scope:
+    kind: declaration_list
+    inside:
+      kind: impl_item
+      not:
+        has:
+          field: trait
+          regex: '.'
+  method-sibling-callee:
+    any:
+      - kind: field_expression
+        all:
+          - has:
+              field: value
+              kind: self
+          - has:
+              field: field
+              pattern: $TARGET
+      - kind: scoped_identifier
+        all:
+          - has:
+              field: path
+              regex: '^Self$'
+          - has:
+              field: name
+              pattern: $TARGET
+  free-sibling-callee:
+    any:
+      - kind: identifier
+        pattern: $TARGET
+      - kind: scoped_identifier
+        all:
+          - has:
+              field: path
+              regex: '^self$'
+          - has:
+              field: name
+              pattern: $TARGET
+  method-forward-call:
+    kind: call_expression
+    all:
+      - has:
+          field: function
+          matches: method-sibling-callee
+      - has:
+          field: arguments
+          pattern: $ARGUMENTS
+  free-forward-call:
+    kind: call_expression
+    all:
+      - has:
+          field: function
+          matches: free-sibling-callee
+      - has:
+          field: arguments
+          pattern: $ARGUMENTS
+  method-forward-value:
+    any:
+      - matches: method-forward-call
+      - kind: await_expression
+        has:
+          matches: method-forward-call
+  free-forward-value:
+    any:
+      - matches: free-forward-call
+      - kind: await_expression
+        has:
+          matches: free-forward-call
+  method-forward-operation:
+    any:
+      - matches: method-forward-value
+      - kind: return_expression
+        has:
+          matches: method-forward-value
+  free-forward-operation:
+    any:
+      - matches: free-forward-value
+      - kind: return_expression
+        has:
+          matches: free-forward-value
+  nontrivial-expr:
+    any:
+      - kind: closure_expression
+      - kind: block
+      - kind: if_expression
+      - kind: match_expression
+      - kind: for_expression
+      - kind: while_expression
+      - kind: loop_expression
+      - kind: async_block
+      - kind: try_expression
+  argument:
+    any:
+      - kind: identifier
+      - kind: self
+  argument-in-parameters:
+    all:
+      - matches: argument
+        pattern: $ARG
+      - inside:
+          kind: function_item
+          stopBy:
+            kind: function_item
+          has:
+            field: parameters
+            has:
+              any:
+                - kind: parameter
+                  has:
+                    field: pattern
+                    pattern: $ARG
+                - kind: self_parameter
+                  has:
+                    pattern: $ARG
+                    kind: self
+  uses-param-or-self:
+    any:
+      - kind: self
+      - matches: argument-in-parameters
+      - has:
+          any:
+            - kind: self
+            - matches: argument-in-parameters
+          stopBy: end
+  nontrivial-extra-arg:
+    all:
+      - not:
+          matches: argument-in-parameters
+      - any:
+          - matches: nontrivial-expr
+          - has:
+              matches: nontrivial-expr
+              stopBy: end
+          - matches: uses-param-or-self
+  parameter-not-forwarded:
+    kind: parameter
+    all:
+      - has:
+          field: pattern
+          pattern: $PARAM
+      - not:
+          inside:
+            kind: function_item
+            stopBy:
+              kind: function_item
+            has:
+              field: body
+              has:
+                kind: arguments
+                pattern: $ARGUMENTS
+                has:
+                  pattern: $PARAM
+                stopBy: end
+  reordered-parameter:
+    kind: parameter
+    all:
+      - has:
+          field: pattern
+          pattern: $RIGHT
+      - follows:
+          kind: parameter
+          has:
+            field: pattern
+            pattern: $LEFT
+          stopBy: end
+      - inside:
+          kind: function_item
+          stopBy:
+            kind: function_item
+          has:
+            field: body
+            has:
+              kind: arguments
+              pattern: $ARGUMENTS
+              has:
+                pattern: $RIGHT
+                precedes:
+                  pattern: $LEFT
+                  stopBy: end
+              stopBy: end
+  sibling-target:
+    kind: function_item
+    all:
+      - has:
+          field: name
+          pattern: $TARGET
+      - not:
+          has:
+            field: name
+            pattern: $NAME
+      - has:
+          kind: visibility_modifier
+          any:
+            - regex: '^pub$'
+            - pattern: $VIS
+rule:
+  all:
+    - kind: function_item
+      has:
+        kind: visibility_modifier
+        all:
+          - pattern: $VIS
+          - not:
+              regex: '^pub\s*\(\s*(in\s+)?self\s*\)$'
+      not:
+        has:
+          kind: function_modifiers
+          regex: '\b(unsafe|extern)\b'
+    - has:
+        field: name
+        pattern: $NAME
+    - any:
+        - all:
+            - inside:
+                matches: inherent-impl-scope
+            - has:
+                field: body
+                has:
+                  all:
+                    - any:
+                        - matches: method-forward-operation
+                        - kind: expression_statement
+                          has:
+                            matches: method-forward-operation
+                    - nthChild:
+                        position: 1
+                        ofRule:
+                          not:
+                            matches: comment
+                    - nthChild:
+                        position: 1
+                        reverse: true
+                        ofRule:
+                          not:
+                            matches: comment
+        - all:
+            - inside:
+                matches: module-scope
+            - not:
+                has:
+                  field: name
+                  regex: '^main$'
+            - has:
+                field: body
+                has:
+                  all:
+                    - any:
+                        - matches: free-forward-operation
+                        - kind: expression_statement
+                          has:
+                            matches: free-forward-operation
+                    - nthChild:
+                        position: 1
+                        ofRule:
+                          not:
+                            matches: comment
+                    - nthChild:
+                        position: 1
+                        reverse: true
+                        ofRule:
+                          not:
+                            matches: comment
+    - any:
+        - precedes:
+            stopBy: end
+            matches: sibling-target
+        - follows:
+            stopBy: end
+            matches: sibling-target
+    - has:
+        field: parameters
+        not:
+          has:
+            kind: parameter
+            any:
+              - not:
+                  has:
+                    field: pattern
+                    kind: identifier
+              - matches: parameter-not-forwarded
+              - matches: reordered-parameter
+    - has:
+        field: body
+        has:
+          kind: arguments
+          pattern: $ARGUMENTS
+          stopBy: end
+          not:
+            has:
+              all:
+                - pattern: $_ARGUMENT
+                - not:
+                    matches: comment
+                - any:
+                    - matches: nontrivial-extra-arg
+                    - all:
+                        - matches: argument-in-parameters
+                        - pattern: $DUPLICATE
+                        - precedes:
+                            pattern: $DUPLICATE
+                            stopBy: end
+                    - kind: self
+                      follows:
+                        matches: argument
+                        stopBy: end

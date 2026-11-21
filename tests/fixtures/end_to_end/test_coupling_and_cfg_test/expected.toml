@@ -1,0 +1,37 @@
+[[diagnostics]]
+rule = "cfg-test-on-non-mod"
+file = "src/vault.rs"
+line = 1
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/vault.rs"
+message_contains = "Vault::raw_balance"
+related_files = ["src/vault.rs"]
+
+[[diagnostics]]
+rule = "cfg-test-on-non-mod"
+file = "src/vault.rs"
+line = 24
+
+[[diagnostics]]
+rule = "cfg-test-on-non-mod"
+file = "src/vault.rs"
+line = 29
+
+[[diagnostics]]
+rule = "cfg-test-on-non-mod"
+file = "src/vault.rs"
+line = 38
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "src/vault.rs"
+message_contains = "Vault::fee"
+related_files = ["src/vault.rs"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/vault.rs"
+message_contains = "reads private field `balance`"
+related_files = ["src/vault.rs"]

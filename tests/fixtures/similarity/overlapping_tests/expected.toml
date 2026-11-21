@@ -1,0 +1,7 @@
+rules = ["similarity"]
+
+[[diagnostics]]
+rule = "overlapping-tests"
+file = "src/validator.rs"
+message_contains = "validate"
+related_files = ["src/validator.rs"]

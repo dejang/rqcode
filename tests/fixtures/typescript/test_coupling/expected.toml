@@ -1,0 +1,13 @@
+rules = ["test-coupling"]
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "src/vault.test.ts"
+message_contains = "Vault.rawSecret"
+related_files = ["src/vault.ts"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/vault.ts"
+message_contains = "debugReset"
+related_files = ["src/vault.test.ts"]

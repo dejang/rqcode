@@ -1,0 +1,16 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "scattered-concept"
+file = "src/order.ts"
+related_files = ["src/pricing.ts", "src/shipping.ts"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/pricing.ts"
+related_files = ["src/order.ts"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/shipping.ts"
+related_files = ["src/order.ts"]

@@ -1,0 +1,9 @@
+id: no-dbg-macro
+language: Rust
+severity: warning
+message: debug macro `dbg!()` left in production code
+note: Remove `dbg!()` or replace with structured logging.
+rule:
+  pattern: dbg!($$$ARGS)
+metadata:
+  skip_tests: true

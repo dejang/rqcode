@@ -1,0 +1,7 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/checkout.ts"
+message_contains = "Order"
+related_files = ["src/models/order.ts"]

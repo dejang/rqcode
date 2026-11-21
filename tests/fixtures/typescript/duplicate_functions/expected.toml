@@ -1,0 +1,7 @@
+rules = ["similarity"]
+
+[[diagnostics]]
+rule = "duplicate-function"
+file = "src/pricing.ts"
+message_contains = "computeWholesaleTotal"
+related_files = ["src/pricing.ts"]

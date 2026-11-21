@@ -1,0 +1,13 @@
+rules = ["test-coupling"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/order.rs"
+message_contains = "reads private field `secret`"
+related_files = ["src/order.rs"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/order.rs"
+message_contains = "initializes via struct literal private field `secret`"
+related_files = ["src/order.rs"]

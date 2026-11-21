@@ -1,0 +1,9 @@
+id: no-unimplemented-macro
+language: Rust
+severity: error
+message: unfinished `unimplemented!()` macro left in production code
+note: Implement the behavior or model unsupported cases via types.
+rule:
+  pattern: unimplemented!($$$ARGS)
+metadata:
+  skip_tests: true

@@ -1,0 +1,7 @@
+rules = ["test-coupling"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/order.rs"
+message_contains = "Order::discount"
+related_files = ["src/order.rs"]

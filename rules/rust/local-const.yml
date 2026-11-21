@@ -1,0 +1,9 @@
+id: local-const
+language: rust
+severity: error
+message: "Local constants are banned. Pass parameters to functions or constructors instead. In rare cases you might need a configuration object with a default implementation."
+rule:
+  kind: const_item
+  inside:
+    kind: function_item
+    stopBy: end

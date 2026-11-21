@@ -1,0 +1,1 @@
+exclude = ["target", ".git", "tests/fixtures"]

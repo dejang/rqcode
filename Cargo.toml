@@ -1,0 +1,29 @@
+[package]
+name = "rqcode"
+version = "0.1.0"
+edition = "2024"
+description = "Language-agnostic static analysis and quality gate for coding agents"
+
+[dependencies]
+ast-grep-config = "0.51"
+ast-grep-core = "0.51"
+ast-grep-language = { version = "0.51", default-features = false, features = ["tree-sitter-rust", "tree-sitter-typescript"] }
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+all = { level = "deny", priority = -2 }
+pedantic = { level = "deny", priority = -1 }
+cognitive_complexity = "deny"
+self_named_module_files = "deny"
+
+[lints.rust]
+unreachable_pub = "deny"

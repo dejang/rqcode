@@ -1,0 +1,4 @@
+[ast_grep]
+enabled = true
+builtin_rules = true                # set false to disable all embedded rules
+rules_dir = ".rqcode/rules"         # folder of custom ast-grep .yml/.yaml rules layered on top

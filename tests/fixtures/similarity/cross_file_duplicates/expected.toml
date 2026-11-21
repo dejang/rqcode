@@ -1,0 +1,7 @@
+rules = ["similarity"]
+
+[[diagnostics]]
+rule = "duplicate-function"
+file = "src/cart.rs"
+message_contains = "compute_invoice_total"
+related_files = ["src/invoice.rs"]

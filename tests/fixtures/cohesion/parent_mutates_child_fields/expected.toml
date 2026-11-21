@@ -1,0 +1,7 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "leaky-module-boundary"
+file = "src/parser/extract.rs"
+message_contains = "FileExtractor"
+related_files = ["src/parser/mod.rs"]

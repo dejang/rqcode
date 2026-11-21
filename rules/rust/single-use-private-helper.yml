@@ -1,0 +1,146 @@
+id: single-use-private-helper
+language: rust
+severity: error
+message: "Private helper `$NAME` has one call site. Inline its body into its caller instead of adding a single-use free function."
+note: "Counts syntactic references within one file, without expanding macros or resolving imports. Duplicate function names and external child modules are skipped."
+labels:
+  DECLARATION:
+    style: primary
+    message: "Inline this private helper."
+# Count same-name identifiers across the file, including callbacks and macro tokens.
+# This is syntactic: ambiguous names conservatively suppress the diagnostic.
+utils:
+  module-scope:
+    any:
+      - kind: source_file
+      - kind: declaration_list
+        inside:
+          kind: mod_item
+  declaration-name:
+    kind: identifier
+    pattern: $NAME
+    inside:
+      kind: function_item
+      field: name
+  sibling-declaration:
+    not:
+      kind: source_file
+    any:
+      - follows:
+          stopBy: end
+          has:
+            matches: declaration-name
+            stopBy: end
+      - precedes:
+          stopBy: end
+          has:
+            matches: declaration-name
+            stopBy: end
+  reference:
+    any:
+      - kind: identifier
+      - kind: shorthand_field_identifier
+    pattern: $NAME
+    not:
+      inside:
+        field: name
+        kind: function_item
+        pattern: $HELPER
+  reference-subtree:
+    any:
+      - matches: reference
+      - has:
+          matches: reference
+          stopBy: end
+  sibling-reference:
+    not:
+      kind: source_file
+    any:
+      - follows:
+          matches: reference-subtree
+          stopBy: end
+      - precedes:
+          matches: reference-subtree
+          stopBy: end
+  call-name:
+    kind: identifier
+    pattern: $NAME
+    any:
+      - inside:
+          matches: callee
+          field: function
+      - inside:
+          kind: scoped_identifier
+          field: name
+          has:
+            field: path
+            regex: '^self$'
+          inside:
+            matches: callee
+            field: function
+  callee:
+    any:
+      - kind: call_expression
+      - kind: generic_function
+        inside:
+          kind: call_expression
+          field: function
+rule:
+  all:
+    - kind: function_item
+      pattern: $HELPER
+      inside:
+        matches: module-scope
+        pattern: $SCOPE
+        # External child modules may use a parent's private functions.
+        not:
+          has:
+            kind: mod_item
+            not:
+              has:
+                field: body
+                kind: declaration_list
+            stopBy: end
+      not:
+        any:
+          - has:
+              kind: visibility_modifier
+              not:
+                regex: '^pub\s*\(\s*(in\s+)?self\s*\)$'
+          - has:
+              kind: function_modifiers
+              regex: '\bextern\b'
+    - has:
+        field: name
+        all:
+          - pattern: $NAME
+          - pattern: $DECLARATION
+    - not:
+        any:
+          - matches: sibling-declaration
+          - inside:
+              matches: sibling-declaration
+              stopBy: end
+    - inside:
+        kind: source_file
+        stopBy: end
+        has:
+          stopBy: end
+          all:
+            - matches: call-name
+            - inside:
+                pattern: $SCOPE
+                stopBy:
+                  matches: module-scope
+            - not:
+                inside:
+                  kind: function_item
+                  pattern: $HELPER
+                  stopBy: end
+            - not:
+                # Any other reference is beside the callee or one of its ancestors.
+                any:
+                  - matches: sibling-reference
+                  - inside:
+                      matches: sibling-reference
+                      stopBy: end

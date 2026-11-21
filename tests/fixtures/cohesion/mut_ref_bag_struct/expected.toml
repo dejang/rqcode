@@ -1,0 +1,13 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "leaky-module-boundary"
+file = "src/parser/body.rs"
+message_contains = "BodyWalker"
+related_files = ["src/parser/extract.rs"]
+
+[[diagnostics]]
+rule = "leaky-module-boundary"
+file = "src/parser/macro_tokens.rs"
+message_contains = "MacroTokenScanner"
+related_files = ["src/parser/body.rs"]

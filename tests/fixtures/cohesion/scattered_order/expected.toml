@@ -1,0 +1,21 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "scattered-concept"
+file = "src/order.rs"
+related_files = ["src/pricing.rs", "src/shipping.rs"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/pricing.rs"
+related_files = ["src/order.rs"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/shipping.rs"
+related_files = ["src/order.rs"]
+
+[[diagnostics]]
+rule = "scattered-tests"
+file = "src/order.rs"
+related_files = ["src/pricing.rs", "src/shipping.rs"]

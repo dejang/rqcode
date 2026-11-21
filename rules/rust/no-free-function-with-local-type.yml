@@ -1,0 +1,80 @@
+id: no-free-function-with-local-type
+language: rust
+severity: error
+message: "Free function `$NAME` takes local type `$TYPE`. Move the operation into `impl $TYPE` and use a self receiver."
+note: "Checks direct owned/borrowed nominal parameters against structs and enums in the same module, including generic and self-qualified types. Does not resolve imports, aliases, macros, or wrapped types."
+utils:
+  module-scope:
+    any:
+      - kind: source_file
+      - kind: declaration_list
+        inside:
+          kind: mod_item
+  nominal-type:
+    any:
+      - kind: type_identifier
+        all:
+          - pattern: $TYPE
+          - not:
+              inside:
+                kind: function_item
+                stopBy:
+                  kind: function_item
+                has:
+                  field: type_parameters
+                  has:
+                    kind: type_parameter
+                    has:
+                      field: name
+                      pattern: $TYPE
+      - kind: scoped_type_identifier
+        all:
+          - has:
+              field: path
+              regex: '^self$'
+          - has:
+              field: name
+              pattern: $TYPE
+  local-type:
+    any:
+      - matches: nominal-type
+      - kind: generic_type
+        has:
+          field: type
+          matches: nominal-type
+  receiver-type:
+    any:
+      - matches: local-type
+      - kind: reference_type
+        has:
+          field: type
+          matches: local-type
+rule:
+  all:
+    - kind: function_item
+      inside:
+        matches: module-scope
+    - has:
+        field: name
+        pattern: $NAME
+    - has:
+        field: parameters
+        has:
+          kind: parameter
+          all:
+            - has:
+                field: type
+                matches: receiver-type
+            - inside:
+                kind: function_item
+                stopBy:
+                  kind: function_item
+                inside:
+                  matches: module-scope
+                  has:
+                    any:
+                      - kind: struct_item
+                      - kind: enum_item
+                    has:
+                      field: name
+                      pattern: $TYPE

@@ -1,0 +1,10 @@
+id: allow-unused-or-dead-code
+language: rust
+severity: error
+message: "Cleanup dead-code."
+rule:
+  kind: attribute_item
+  has:
+    kind: attribute
+    regex: '^allow\([^)]*(dead_code|unused)'
+    stopBy: end

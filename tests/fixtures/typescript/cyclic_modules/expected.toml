@@ -1,0 +1,6 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "cyclic-module-dependency"
+file = "src/alpha.ts"
+related_files = ["src/beta.ts"]

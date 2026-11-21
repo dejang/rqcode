@@ -1,0 +1,7 @@
+rules = ["test-coupling"]
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "src/order.rs"
+message_contains = "Order::compute_tax"
+related_files = ["src/order.rs"]

@@ -1,0 +1,264 @@
+id: no-private-forwarder
+language: rust
+severity: error
+message: "Private function `$NAME` only forwards its arguments. Remove this indirection and call the underlying operation directly."
+note: "Checks private functions and inherent methods with a single direct call, return, or awaited call (optionally supplying default/constant arguments). Explicit adaptations, conventional constructors/conversions, and generic calls are excluded; Rust types are not resolved."
+labels:
+  NAME:
+    style: primary
+utils:
+  argument:
+    any:
+      - kind: identifier
+      - kind: self
+  comment:
+    any:
+      - kind: line_comment
+      - kind: block_comment
+  module-scope:
+    any:
+      - kind: source_file
+      - kind: declaration_list
+        inside:
+          kind: mod_item
+  inherent-impl-scope:
+    kind: declaration_list
+    inside:
+      kind: impl_item
+      not:
+        has:
+          field: trait
+          regex: '.'
+  direct-callee:
+    any:
+      - kind: identifier
+      - kind: scoped_identifier
+      - kind: field_expression
+        regex: '^self(\s*\.\s*(r#)?[\pL\pN_]+)+$'
+    not:
+      any:
+        - kind: identifier
+          regex: '^(r#)?\p{Lu}'
+        - kind: scoped_identifier
+          has:
+            field: name
+            regex: '^(r#)?(\p{Lu}|new$|with_capacity$|from$|try_from$)'
+        - kind: field_expression
+          has:
+            field: field
+            regex: '^(into|try_into|as_ref|as_mut|as_str|as_slice|to_owned|to_string|clone|borrow|borrow_mut)$'
+  nontrivial-expr:
+    any:
+      - kind: closure_expression
+      - kind: block
+      - kind: if_expression
+      - kind: match_expression
+      - kind: for_expression
+      - kind: while_expression
+      - kind: loop_expression
+      - kind: async_block
+      - kind: try_expression
+  forward-call:
+    kind: call_expression
+    all:
+      - has:
+          field: function
+          pattern: $CALLEE
+      - has:
+          field: arguments
+          pattern: $ARGUMENTS
+  forward-value:
+    any:
+      - matches: forward-call
+      - kind: await_expression
+        has:
+          matches: forward-call
+  forward-operation:
+    any:
+      - matches: forward-value
+      - kind: return_expression
+        has:
+          matches: forward-value
+  argument-in-parameters:
+    all:
+      - matches: argument
+        pattern: $ARG
+      - inside:
+          kind: function_item
+          stopBy:
+            kind: function_item
+          has:
+            field: parameters
+            has:
+              any:
+                - kind: parameter
+                  has:
+                    field: pattern
+                    pattern: $ARG
+                - kind: self_parameter
+                  has:
+                    pattern: $ARG
+                    kind: self
+  uses-param-or-self:
+    any:
+      - kind: self
+      - matches: argument-in-parameters
+      - has:
+          any:
+            - kind: self
+            - matches: argument-in-parameters
+          stopBy: end
+  nontrivial-extra-arg:
+    all:
+      - not:
+          matches: argument-in-parameters
+      - any:
+          - matches: nontrivial-expr
+          - has:
+              matches: nontrivial-expr
+              stopBy: end
+          - matches: uses-param-or-self
+  parameter-not-forwarded:
+    kind: parameter
+    all:
+      - has:
+          field: pattern
+          pattern: $PARAM
+      - not:
+          inside:
+            kind: function_item
+            stopBy:
+              kind: function_item
+            has:
+              field: body
+              has:
+                kind: arguments
+                pattern: $ARGUMENTS
+                has:
+                  pattern: $PARAM
+                stopBy: end
+  reordered-parameter:
+    # Adjacent parameter pairs must retain their order in the call.
+    kind: parameter
+    all:
+      - has:
+          field: pattern
+          pattern: $RIGHT
+      - follows:
+          kind: parameter
+          has:
+            field: pattern
+            pattern: $LEFT
+          stopBy: end
+      - inside:
+          kind: function_item
+          stopBy:
+            kind: function_item
+          has:
+            field: body
+            has:
+              kind: arguments
+              pattern: $ARGUMENTS
+              has:
+                pattern: $RIGHT
+                precedes:
+                  pattern: $LEFT
+                  stopBy: end
+              stopBy: end
+rule:
+  all:
+    - kind: function_item
+      any:
+        - inside:
+            matches: inherent-impl-scope
+        - all:
+            - inside:
+                matches: module-scope
+            - not:
+                has:
+                  field: name
+                  regex: '^main$'
+      not:
+        any:
+          - has:
+              kind: visibility_modifier
+              not:
+                regex: '^pub\s*\(\s*(in\s+)?self\s*\)$'
+          - has:
+              kind: function_modifiers
+              regex: '\b(unsafe|extern)\b'
+    - has:
+        field: name
+        pattern: $NAME
+    - has:
+        field: body
+        has:
+          all:
+            - any:
+                - matches: forward-operation
+                - kind: expression_statement
+                  has:
+                    matches: forward-operation
+            # Exactly one statement or tail expression; comments do not count.
+            - nthChild:
+                position: 1
+                ofRule:
+                  not:
+                    matches: comment
+            - nthChild:
+                position: 1
+                reverse: true
+                ofRule:
+                  not:
+                    matches: comment
+    - has:
+        field: parameters
+        not:
+          has:
+            kind: parameter
+            any:
+              - not:
+                  has:
+                    field: pattern
+                    kind: identifier
+              - matches: parameter-not-forwarded
+              - matches: reordered-parameter
+    - has:
+        field: body
+        has:
+          kind: arguments
+          pattern: $ARGUMENTS
+          stopBy: end
+          not:
+            has:
+              all:
+                - pattern: $_ARGUMENT
+                - not:
+                    matches: comment
+                - any:
+                    - matches: nontrivial-extra-arg
+                    - all:
+                        - matches: argument-in-parameters
+                        - pattern: $DUPLICATE
+                        - precedes:
+                            pattern: $DUPLICATE
+                            stopBy: end
+                    - kind: self
+                      follows:
+                        matches: argument
+                        stopBy: end
+    - not:
+        has:
+          field: body
+          has:
+            kind: call_expression
+            has:
+              field: function
+              any:
+                - pattern: $NAME
+                - pattern: self.$NAME
+                - pattern: Self::$NAME
+            stopBy: end
+constraints:
+  CALLEE:
+    matches: direct-callee

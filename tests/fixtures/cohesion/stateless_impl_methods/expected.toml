@@ -1,0 +1,31 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "src/injector.rs"
+message_contains = "TextInjector::with_transient_paste"
+related_files = ["src/injector.rs"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "src/injector.rs"
+message_contains = "TextInjector::snapshot_pasteboard"
+related_files = ["src/injector.rs"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "src/injector.rs"
+message_contains = "TextInjector::build_pasteboard_item"
+related_files = ["src/injector.rs"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "src/injector.rs"
+message_contains = "TextInjector::restore_pasteboard"
+related_files = ["src/injector.rs"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "src/injector.rs"
+message_contains = "TextInjector::is_trusted"
+related_files = ["src/injector.rs"]

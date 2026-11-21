@@ -1,0 +1,9 @@
+id: no-todo-macro
+language: Rust
+severity: error
+message: unfinished `todo!()` macro left in production code
+note: Implement the missing logic or return a typed error.
+rule:
+  pattern: todo!($$$ARGS)
+metadata:
+  skip_tests: true

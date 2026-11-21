@@ -1,0 +1,6 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "cyclic-module-dependency"
+file = "src/parser/body.rs"
+related_files = ["src/parser/extract.rs"]
