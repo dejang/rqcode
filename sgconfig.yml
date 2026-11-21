@@ -1,0 +1,4 @@
+ruleDirs:
+  - rules/rust
+testConfigs:
+  - testDir: tests/rule_tests
