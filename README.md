@@ -8,20 +8,23 @@ It runs as a fast single-binary CLI (with text and JSON output) or as an embedda
 
 ---
 
-## Quick Start
+## Installation & Quick Start
 
 ```bash
-# Build and run against the current repository
-cargo run -- check .
+# Install from crates.io
+cargo install rqcode
+
+# Check the current repository
+rqcode check .
 
 # Check a specific directory or file with JSON output
-cargo run -- check path/to/project --format json
+rqcode check path/to/project --format json
 
 # Treat warnings as gate failures and use an explicit config file
-cargo run -- check path/to/project --config custom-rqcode.toml --fail-on-warning
+rqcode check path/to/project --config custom-rqcode.toml --fail-on-warning
 
 # List all active rules (core + embedded + configured custom rules)
-cargo run -- rules
+rqcode rules
 ```
 
 ### Exit Codes
@@ -199,3 +202,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo run -- check .
 ```
+
+---
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

@@ -2,7 +2,22 @@
 name = "rqcode"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Language-agnostic static analysis and quality gate for coding agents"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/dejang/rqcode"
+keywords = ["linter", "static-analysis", "ast", "code-quality", "cli"]
+categories = ["development-tools", "command-line-utilities"]
+include = [
+    "src/**",
+    "rules/**",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
 
 [dependencies]
 ast-grep-config = "0.51"
