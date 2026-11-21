@@ -10,7 +10,7 @@ It runs as a fast single-binary CLI (with text and JSON output) or as an embedda
 
 ## Installation
 
-### Prebuilt binary (macOS — Apple Silicon & Intel)
+### Prebuilt binary (macOS & Linux — x86_64 & arm64)
 
 Install without the Rust/Cargo toolchain:
 

@@ -33,6 +33,13 @@ detect_target() {
                 *) err "unsupported macOS architecture: ${arch}. Install via Cargo instead: cargo install rqcode" ;;
             esac
             ;;
+        Linux)
+            case "$arch" in
+                x86_64 | amd64) printf '%s' "x86_64-unknown-linux-gnu" ;;
+                aarch64 | arm64) printf '%s' "aarch64-unknown-linux-gnu" ;;
+                *) err "unsupported Linux architecture: ${arch}. Install via Cargo instead: cargo install rqcode" ;;
+            esac
+            ;;
         *)
             err "no prebuilt binary available for ${os} (${arch}). Install via Cargo instead: cargo install rqcode"
             ;;

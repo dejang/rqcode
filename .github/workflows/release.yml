@@ -23,9 +23,13 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
@@ -57,7 +61,11 @@ jobs:
           strip "$bin_path"
           archive="rqcode-${{ matrix.target }}.tar.gz"
           tar -czf "dist/${archive}" -C "target/${{ matrix.target }}/release" rqcode
-          (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+          else
+            (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
