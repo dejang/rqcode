@@ -6,11 +6,24 @@
 
 It runs as a fast single-binary CLI (with text and JSON output) or as an embeddable Rust library, and supports **Rust**, **TypeScript**, and **Swift** out of the box through a strictly isolated, injectable language-frontend architecture.
 
+## Why `rqcode`?
+
+Observed failure modes across coding agents today:
+
+- **Duplicate utilities:** Agents forget an existing helper already does the job and write a new one.
+- **Additive bias:** Agents prefer writing new parallel code over extending existing abstractions.
+- **Implementation-locked tests:** Agents write tests that validate how they reasoned through their implementation rather than the behavior itself. Changing the implementation without changing behavior then forces changing the tests, breaking the trust that tests are supposed to provide as a safe refactoring guardrail.
+- **Instruction drift:** Agents selectively apply skills and prompt guidelines over long sessions, so telling an agent to reuse code or follow architecture rules is not a guarantee.
+- **Architectural blind spots:** Agents lack a persistent sense of system architecture, often producing tightly coupled modules, leaky boundaries, and circular dependencies.
+- **Gate-driven loops:** When a gate exists, agents will hammer it repeatedly (tests, lints, formatters) because passing the gate *is* the goal, which is why deterministic tooling must run in milliseconds.
+
+We cannot build reliable automated software factories, or remove the human verification bottleneck, if we cannot trust the agents writing the code. `rqcode` addresses this by using fast, deterministic checks to steer agents toward higher-quality structure. It does not prove functional correctness directly; instead, it combines lint rules, architectural guardrails, and behavior-focused test checks so refactors and automated changes stay trustworthy.
+
 ---
 
 ## Installation
 
-### Prebuilt binary (macOS & Linux — x86_64 & arm64)
+### Prebuilt binary (macOS & Linux, x86_64 & arm64)
 
 Install without the Rust/Cargo toolchain:
 
@@ -76,13 +89,13 @@ All language-specific logic is confined to `src/lang/<language>/` and injected v
 - **`LanguageGrammar`** (`src/ast/language.rs`): supplies the tree-sitter grammar (`ast-grep`), language ID/aliases, file extensions, `CommentStyle` (for suppression parsing), member display separator (`::` for Rust, `.` for TypeScript and Swift), and field-initializer wording.
 - **`LanguageFrontend`** (`src/lang/mod.rs`): extracts a normalized `FileAst` (types, fields, functions, calls, imports, re-exports, normalized `NormalizedTree` body ASTs, `FileRole`, `ModulePath`) and provides language-specific default excludes (e.g., `target` for Rust, `node_modules`/`dist` for TypeScript, `.build`/`.swiftpm`/`DerivedData`/`Pods`/`Carthage` for Swift).
 
-`src/ast/` and `src/rules/` are strictly language-agnostic—they never import `ast_grep_language` or any concrete frontend. This invariant and end-to-end custom-language injection are continuously verified by `tests/architecture_guardrails.rs`.
+`src/ast/` and `src/rules/` are strictly language-agnostic: they never import `ast_grep_language` or any concrete frontend. This invariant and end-to-end custom-language injection are continuously verified by `tests/architecture_guardrails.rs`.
 
 ### Built-in Frontends
 
-- **Rust** (`src/lang/rust/`): `.rs` — structs, enums, traits, inherent/trait `impl`s, `#[cfg(test)]` modules, macro token extraction, `use` / `pub use` re-exports, crate/module path resolution.
-- **TypeScript** (`src/lang/typescript/`): `.ts`, `.tsx`, `.mts`, `.cts` — classes, interfaces, type aliases, parameter properties, decorators, constructors/static/instance methods, ES imports, default/namespace/barrel re-exports (`export *`, `export * as ns`, import-then-export), and `describe`/`it`/`test` suites.
-- **Swift** (`src/lang/swift/`): `.swift` — structs, classes, actors, enums, protocols, inherent vs. protocol-conformance `extension`s, `init`/`deinit`, stored & computed properties, access levels (`open`/`public`/`internal`/`package`/`fileprivate`/`private`/`private(set)`), attributes (`@MainActor`, `@main`), `inout` parameters, `@testable`/`@_exported`/scoped imports, SwiftPM & Xcode target layouts, and `XCTestCase` / Swift Testing (`@Suite`, `@Test`) suites.
+- **Rust** (`src/lang/rust/`): `.rs` - structs, enums, traits, inherent/trait `impl`s, `#[cfg(test)]` modules, macro token extraction, `use` / `pub use` re-exports, crate/module path resolution.
+- **TypeScript** (`src/lang/typescript/`): `.ts`, `.tsx`, `.mts`, `.cts` - classes, interfaces, type aliases, parameter properties, decorators, constructors/static/instance methods, ES imports, default/namespace/barrel re-exports (`export *`, `export * as ns`, import-then-export), and `describe`/`it`/`test` suites.
+- **Swift** (`src/lang/swift/`): `.swift` - structs, classes, actors, enums, protocols, inherent vs. protocol-conformance `extension`s, `init`/`deinit`, stored & computed properties, access levels (`open`/`public`/`internal`/`package`/`fileprivate`/`private`/`private(set)`), attributes (`@MainActor`, `@main`), `inout` parameters, `@testable`/`@_exported`/scoped imports, SwiftPM & Xcode target layouts, and `XCTestCase` / Swift Testing (`@Suite`, `@Test`) suites.
 
 ---
 
