@@ -1,9 +1,10 @@
-use crate::ast::codebase::{Codebase, FuncId};
-use crate::ast::vector::TfIdfCorpus;
+use crate::ast::LanguageId;
+use crate::ast::codebase::{Codebase, FuncId, IndexedFunc};
+use crate::ast::similarity::SimilarityCorpus;
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::rules::Rule;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 /// Diagnostic IDs emitted by [`SimilarityRule`].
@@ -23,8 +24,12 @@ impl SimilarityRuleId {
     }
 }
 
-/// Detects duplicate production functions and overlapping/redundant tests using
-/// TF-IDF weighted cosine similarity over normalized AST n-grams.
+/// Detects duplicate production functions and overlapping/redundant tests using the 4-stage
+/// structural AST similarity pipeline (eligibility folding -> consistent Merkle subtree
+/// prefix-filtered Jaccard -> weighted Tree Edit Distance verification).
+///
+/// Functions and tests are partitioned by opaque [`LanguageId`] so cross-language polyglot
+/// repositories never produce unactionable cross-language duplication errors.
 pub struct SimilarityRule;
 
 impl Rule for SimilarityRule {
@@ -33,7 +38,7 @@ impl Rule for SimilarityRule {
     }
 
     fn description(&self) -> &'static str {
-        "Detects duplicate functions and overlapping tests via AST cosine similarity"
+        "Detects duplicate functions and overlapping tests via structural AST similarity"
     }
 
     fn check(&self, codebase: &Codebase, config: &Config) -> Vec<Diagnostic> {
@@ -42,103 +47,122 @@ impl Rule for SimilarityRule {
             return Vec::new();
         }
 
-        let mut prod_corpus = TfIdfCorpus::new(cfg.ngram_size);
-        let mut test_corpus = TfIdfCorpus::new(cfg.ngram_size);
-
+        let params = cfg.to_params();
+        let mut prod_corpora: BTreeMap<LanguageId, SimilarityCorpus> = BTreeMap::new();
+        let mut test_corpora: BTreeMap<LanguageId, SimilarityCorpus> = BTreeMap::new();
         for func in codebase.functions() {
-            if func.decl.body_tokens.len() < cfg.min_tokens {
-                continue;
-            }
-            if func.decl.is_test() {
-                test_corpus.add_document(func.id.0, &func.decl.body_tokens);
-            } else if !func.decl.is_test_code() && !codebase.file(func.file_id).is_test_file() {
-                prod_corpus.add_document(func.id.0, &func.decl.body_tokens);
+            let file = codebase.file(func.file_id);
+            let target = if func.decl.is_test() {
+                Some(&mut test_corpora)
+            } else if !func.decl.is_test_code() && !file.is_test_file() {
+                Some(&mut prod_corpora)
+            } else {
+                None
+            };
+            if let Some(corpora) = target {
+                corpora
+                    .entry(file.language)
+                    .or_insert_with(|| SimilarityCorpus::with_params(params))
+                    .add_unit(func.id.0, &func.decl.body_tree);
             }
         }
 
         let mut diagnostics = Vec::new();
-
-        for m in prod_corpus.similar_pairs(cfg.function_threshold) {
-            let left = codebase.func(FuncId(m.left_id()));
-            let right = codebase.func(FuncId(m.right_id()));
-            let pct = format_percent(m.score());
-
-            diagnostics.push(
-                Diagnostic::new(
-                    SimilarityRuleId::DuplicateFunction.as_str(),
-                    cfg.severity,
-                    left.decl.span.clone(),
-                    format!(
-                        "function `{}` has {pct}% structural cosine similarity with `{}`",
-                        left.display_name(),
-                        right.display_name()
+        for_each_match(
+            &prod_corpora,
+            cfg.function_threshold,
+            codebase,
+            |left, right, pct, qualifier| {
+                diagnostics.push(
+                    Diagnostic::new(
+                        SimilarityRuleId::DuplicateFunction.as_str(),
+                        cfg.severity,
+                        left.decl.span.clone(),
+                        format!(
+                            "function `{}` has {pct}% structural AST similarity{qualifier} with `{}`",
+                            left.display_name(),
+                            right.display_name()
+                        ),
+                    )
+                    .with_related(
+                        right.decl.span.clone(),
+                        format!("overlapping implementation `{}`", right.display_name()),
+                    )
+                    .with_suggestion(
+                        "Extract the shared logic into a single reusable function or method and parameterize the differing inputs.",
                     ),
-                )
-                .with_related(
-                    right.decl.span.clone(),
-                    format!("overlapping implementation `{}`", right.display_name()),
-                )
-                .with_suggestion(
-                    "Extract the shared logic into a single reusable function or method and parameterize the differing inputs.",
-                ),
-            );
-        }
+                );
+            },
+        );
 
         let mut right_callees: HashSet<&str> = HashSet::new();
         let mut detail = String::new();
-
-        for m in test_corpus.similar_pairs(cfg.test_threshold) {
-            let left = codebase.func(FuncId(m.left_id()));
-            let right = codebase.func(FuncId(m.right_id()));
-            let pct = format_percent(m.score());
-
-            right_callees.clear();
-            for callee in right.decl.distinct_callees() {
-                right_callees.insert(callee);
-            }
-
-            detail.clear();
-            let mut first = true;
-            for callee in left.decl.distinct_callees() {
-                if right_callees.contains(callee) {
-                    if first {
-                        detail.push_str(" (both exercise: ");
-                        first = false;
-                    } else {
-                        detail.push_str(", ");
+        for_each_match(
+            &test_corpora,
+            cfg.test_threshold,
+            codebase,
+            |left, right, pct, qualifier| {
+                right_callees.clear();
+                right_callees.extend(right.decl.distinct_callees());
+                detail.clear();
+                for callee in left.decl.distinct_callees() {
+                    if right_callees.contains(callee) {
+                        let sep = if detail.is_empty() {
+                            " (both exercise: "
+                        } else {
+                            ", "
+                        };
+                        let _ = write!(detail, "{sep}{callee}");
                     }
-                    let _ = write!(detail, "{callee}");
                 }
-            }
-            if !first {
-                detail.push(')');
-            }
-
-            diagnostics.push(
-                Diagnostic::new(
-                    SimilarityRuleId::OverlappingTests.as_str(),
-                    cfg.severity,
-                    left.decl.span.clone(),
-                    format!(
-                        "test `{}` overlaps {pct}% with test `{}`{detail}",
-                        left.display_name(),
-                        right.display_name()
+                if !detail.is_empty() {
+                    detail.push(')');
+                }
+                diagnostics.push(
+                    Diagnostic::new(
+                        SimilarityRuleId::OverlappingTests.as_str(),
+                        cfg.severity,
+                        left.decl.span.clone(),
+                        format!(
+                            "test `{}` overlaps {pct}%{qualifier} with test `{}`{detail}",
+                            left.display_name(),
+                            right.display_name()
+                        ),
+                    )
+                    .with_related(
+                        right.decl.span.clone(),
+                        format!("overlapping test `{}`", right.display_name()),
+                    )
+                    .with_suggestion(
+                        "Remove the redundant test or consolidate both into one parameterized/table-driven test covering distinct behaviors.",
                     ),
-                )
-                .with_related(
-                    right.decl.span.clone(),
-                    format!("overlapping test `{}`", right.display_name()),
-                )
-                .with_suggestion(
-                    "Remove the redundant test or consolidate both into one parameterized/table-driven test covering distinct behaviors.",
-                ),
-            );
-        }
+                );
+            },
+        );
 
         diagnostics
     }
 }
 
-fn format_percent(score: f64) -> String {
-    format!("{:.0}", (score * 100.0).clamp(0.0, 100.0))
+fn for_each_match<'a, F>(
+    corpora: &BTreeMap<LanguageId, SimilarityCorpus>,
+    threshold: f64,
+    codebase: &'a Codebase,
+    mut emit: F,
+) where
+    F: FnMut(&'a IndexedFunc, &'a IndexedFunc, String, &'static str),
+{
+    for corpus in corpora.values() {
+        for m in corpus.similar_pairs(threshold) {
+            let left = codebase.func(FuncId(m.left_id()));
+            let right = codebase.func(FuncId(m.right_id()));
+            let pct = format!("{:.0}", (m.score() * 100.0).clamp(0.0, 100.0));
+            let qualifier = if m.tsed().is_some() {
+                ""
+            } else {
+                " (Merkle subtree estimate)"
+            };
+            emit(left, right, pct, qualifier);
+        }
+    }
 }

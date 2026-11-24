@@ -347,7 +347,7 @@ mod tests {
         CallKind, CallReceiver, CallSite, FieldAccess, FieldDecl, FunctionDecl, FunctionRole,
         ImportDecl, ImportKind, ParamDecl, TypeDecl, TypeKind, TypeRef, Visibility,
     };
-    use crate::ast::vector::NormalizedAst;
+    use crate::ast::similarity::NormalizedTree;
     use crate::lang::rust::rust_language_spec;
 
     fn make_file(
@@ -413,7 +413,7 @@ mod tests {
                 access: ParamAccess::MutableRef,
             }],
             return_type: None,
-            body_tokens: NormalizedAst::default(),
+            body_tree: NormalizedTree::default(),
             field_accesses: vec![FieldAccess {
                 receiver_param: "order".to_string(),
                 field_name: "total".to_string(),
@@ -483,7 +483,7 @@ mod tests {
             role: FunctionRole::Production,
             params: vec![],
             return_type: None,
-            body_tokens: NormalizedAst::default(),
+            body_tree: NormalizedTree::default(),
             field_accesses: vec![],
             calls: vec![],
             constructed_types: vec![],
@@ -502,7 +502,7 @@ mod tests {
             role: FunctionRole::Test,
             params: vec![],
             return_type: None,
-            body_tokens: NormalizedAst::default(),
+            body_tree: NormalizedTree::default(),
             field_accesses: vec![],
             calls: vec![CallSite {
                 kind: CallKind::Scoped,

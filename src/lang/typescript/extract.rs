@@ -1,5 +1,5 @@
 use super::TsNode;
-use super::body::{ExtractedBody, TsBodyWalker};
+use super::body::TsBodyWalker;
 use super::imports::{ExportClauseResult, ImportBatch, ModuleImportParser};
 use super::syntax::{self, TestRunnerKind};
 use crate::ast::item::{
@@ -7,6 +7,7 @@ use crate::ast::item::{
     TypeDecl, TypeKind, TypeRef, Visibility,
 };
 use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
+use crate::lang::common::FunctionHeader;
 use std::collections::HashMap;
 use std::path::Component;
 
@@ -15,16 +16,6 @@ struct DeclMeta {
     visibility: Visibility,
     is_default_export: bool,
     in_test_context: bool,
-}
-
-struct FuncHeader {
-    name: String,
-    owner_type: Option<String>,
-    self_receiver: Option<ParamAccess>,
-    visibility: Visibility,
-    role: FunctionRole,
-    params: Vec<ParamDecl>,
-    return_type: Option<TypeRef>,
 }
 
 pub(super) struct TypeScriptExtractor<'a> {
@@ -312,18 +303,18 @@ impl<'a> TypeScriptExtractor<'a> {
         let body =
             TsBodyWalker::new(self.tree, &self.namespace_imports).extract(node.field("body"));
 
-        Some(self.build_function_decl(
-            node,
-            FuncHeader {
+        Some(body.into_function_decl(
+            FunctionHeader {
                 name,
                 owner_type: Some(owner_name.to_string()),
+                is_interface_impl: false,
                 self_receiver,
                 visibility: syntax::extract_visibility(node),
                 role,
                 params,
                 return_type,
             },
-            body,
+            self.tree.node_span(node),
         ))
     }
 
@@ -413,18 +404,18 @@ impl<'a> TypeScriptExtractor<'a> {
         let body =
             TsBodyWalker::new(self.tree, &self.namespace_imports).extract(node.field("body"));
 
-        self.functions.push(self.build_function_decl(
-            node,
-            FuncHeader {
+        self.functions.push(body.into_function_decl(
+            FunctionHeader {
                 name,
                 owner_type: None,
+                is_interface_impl: false,
                 self_receiver: None,
                 visibility: meta.visibility,
                 role,
                 params,
                 return_type,
             },
-            body,
+            self.tree.node_span(node),
         ));
     }
 
@@ -539,47 +530,20 @@ impl<'a> TypeScriptExtractor<'a> {
                 let params = self.extract_callable_params(&cb);
                 let body =
                     TsBodyWalker::new(self.tree, &self.namespace_imports).extract(cb.field("body"));
-                self.functions.push(self.build_function_decl(
-                    call_node,
-                    FuncHeader {
+                self.functions.push(body.into_function_decl(
+                    FunctionHeader {
                         name,
                         owner_type: None,
+                        is_interface_impl: false,
                         self_receiver: None,
                         visibility: Visibility::Private,
                         role: FunctionRole::Test,
                         params,
                         return_type: None,
                     },
-                    body,
+                    self.tree.node_span(call_node),
                 ));
             }
-        }
-    }
-
-    fn build_function_decl(
-        &self,
-        span_node: &TsNode<'a>,
-        header: FuncHeader,
-        body: ExtractedBody,
-    ) -> FunctionDecl {
-        FunctionDecl {
-            name: header.name,
-            owner_type: header.owner_type,
-            is_interface_impl: false,
-            self_receiver: header.self_receiver,
-            visibility: header.visibility,
-            role: header.role,
-            params: header.params,
-            return_type: header.return_type,
-            body_tokens: body.body_tokens,
-            field_accesses: body.field_accesses,
-            calls: body.calls,
-            constructed_types: body.constructed_types,
-            local_bindings: body.local_bindings,
-            field_inits: body.field_inits,
-            referenced_idents: body.referenced_idents,
-            scoped_ident_refs: body.scoped_ident_refs,
-            span: self.tree.node_span(span_node),
         }
     }
 }

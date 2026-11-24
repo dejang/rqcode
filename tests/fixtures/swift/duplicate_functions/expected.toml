@@ -1,0 +1,7 @@
+rules = ["similarity"]
+
+[[diagnostics]]
+rule = "duplicate-function"
+file = "Sources/Shop/Pricing.swift"
+message_contains = "computeWholesaleTotal"
+related_files = ["Sources/Shop/Pricing.swift"]

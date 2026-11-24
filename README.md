@@ -4,7 +4,7 @@
 
 `rqcode` catches structural decay and LLM anti-patterns that compilers and standard linters miss: scattered domain concepts, leaky module boundaries, cyclic module dependencies, stateless methods attached to types, tests coupled to private internals, near-duplicate functions, overlapping tests, and redundant forwarding wrappers.
 
-It runs as a fast single-binary CLI (with text and JSON output) or as an embeddable Rust library, and supports both **Rust** and **TypeScript** out of the box through a strictly isolated, injectable language-frontend architecture.
+It runs as a fast single-binary CLI (with text and JSON output) or as an embeddable Rust library, and supports **Rust**, **TypeScript**, and **Swift** out of the box through a strictly isolated, injectable language-frontend architecture.
 
 ---
 
@@ -73,8 +73,8 @@ SourceTree ──▶ LanguageFrontend ──▶ SyntaxTree + FileAst ──▶ C
 
 All language-specific logic is confined to `src/lang/<language>/` and injected via two traits:
 
-- **`LanguageGrammar`** (`src/ast/language.rs`): supplies the tree-sitter grammar (`ast-grep`), language ID/aliases, file extensions, `CommentStyle` (for suppression parsing), member display separator (`::` for Rust, `.` for TypeScript), and field-initializer wording.
-- **`LanguageFrontend`** (`src/lang/mod.rs`): extracts a normalized `FileAst` (types, fields, functions, calls, imports, re-exports, normalized `NormToken` body streams, `FileRole`, `ModulePath`) and provides language-specific default excludes (e.g., `target` for Rust, `node_modules`/`dist` for TypeScript).
+- **`LanguageGrammar`** (`src/ast/language.rs`): supplies the tree-sitter grammar (`ast-grep`), language ID/aliases, file extensions, `CommentStyle` (for suppression parsing), member display separator (`::` for Rust, `.` for TypeScript and Swift), and field-initializer wording.
+- **`LanguageFrontend`** (`src/lang/mod.rs`): extracts a normalized `FileAst` (types, fields, functions, calls, imports, re-exports, normalized `NormalizedTree` body ASTs, `FileRole`, `ModulePath`) and provides language-specific default excludes (e.g., `target` for Rust, `node_modules`/`dist` for TypeScript, `.build`/`.swiftpm`/`DerivedData`/`Pods`/`Carthage` for Swift).
 
 `src/ast/` and `src/rules/` are strictly language-agnostic—they never import `ast_grep_language` or any concrete frontend. This invariant and end-to-end custom-language injection are continuously verified by `tests/architecture_guardrails.rs`.
 
@@ -82,6 +82,7 @@ All language-specific logic is confined to `src/lang/<language>/` and injected v
 
 - **Rust** (`src/lang/rust/`): `.rs` — structs, enums, traits, inherent/trait `impl`s, `#[cfg(test)]` modules, macro token extraction, `use` / `pub use` re-exports, crate/module path resolution.
 - **TypeScript** (`src/lang/typescript/`): `.ts`, `.tsx`, `.mts`, `.cts` — classes, interfaces, type aliases, parameter properties, decorators, constructors/static/instance methods, ES imports, default/namespace/barrel re-exports (`export *`, `export * as ns`, import-then-export), and `describe`/`it`/`test` suites.
+- **Swift** (`src/lang/swift/`): `.swift` — structs, classes, actors, enums, protocols, inherent vs. protocol-conformance `extension`s, `init`/`deinit`, stored & computed properties, access levels (`open`/`public`/`internal`/`package`/`fileprivate`/`private`/`private(set)`), attributes (`@MainActor`, `@main`), `inout` parameters, `@testable`/`@_exported`/scoped imports, SwiftPM & Xcode target layouts, and `XCTestCase` / Swift Testing (`@Suite`, `@Test`) suites.
 
 ---
 
@@ -89,7 +90,7 @@ All language-specific logic is confined to `src/lang/<language>/` and injected v
 
 ### Core Polyglot Rules (`src/rules/`)
 
-Core rules operate exclusively on the resolved language-agnostic `Codebase` graph and work identically across Rust, TypeScript, and any custom `LanguageFrontend`.
+Core rules operate exclusively on the resolved language-agnostic `Codebase` graph and work identically across Rust, TypeScript, Swift, and any custom `LanguageFrontend`.
 
 #### 1. Cohesion & Module Boundaries (`cohesion`)
 | Diagnostic ID | What it catches |
@@ -112,7 +113,7 @@ Core rules operate exclusively on the resolved language-agnostic `Codebase` grap
 #### 3. Structural Similarity (`similarity`)
 | Diagnostic ID | What it catches |
 | ------------- | --------------- |
-| `duplicate-function` | Production functions with near-identical normalized AST structure (TF-IDF n-gram cosine similarity over canonical `NormToken` streams; invariant to variable renaming) |
+| `duplicate-function` | Production functions with near-identical normalized AST structure (4-stage pipeline: sibling-folded boilerplate & structural diversity filter, callee/operator-preserving `NormalizedTree` with consistent parameterized renaming, prefix-filtered Merkle subtree Jaccard retrieval, and weighted Zhang-Shasha Tree Edit Distance verification) |
 | `overlapping-tests` | Redundant tests exercising largely the same operations |
 
 ### Embedded & Custom `ast-grep` YAML Rules (`rules/`)
@@ -122,7 +123,7 @@ Core rules operate exclusively on the resolved language-agnostic `Codebase` grap
 Built-in Rust YAML rules (`rules/rust/*.yml`):
 
 - **Wrappers & indirection:** `no-redundant-wrapper`, `no-private-forwarder`, `single-use-private-helper`, `no-free-function-with-local-type`
-- **Configuration & constants:** `module-const`, `local-const`, `const-fn-config`
+- **Configuration & constants:** `module-const`, `local-const`, `impl-const`, `const-fn-config`
 - **Code structure & safety:** `max-file-lines` (600 lines), `too-many-params`, `unwrap-or-expect`, `float-equality-literal`, `no-pub-in-main`, `cfg-test-on-non-mod`
 - **Performance:** `collect-in-loop`, `linear-scan-in-loop`
 - **Hygiene & unfinished code:** `no-todo-macro`, `no-unimplemented-macro`, `no-dbg-macro`, `allow-clippy-lint`, `allow-unused-or-dead-code`, `no-doc-attribute`
@@ -142,7 +143,7 @@ enabled = true
 function_threshold = 0.85
 test_threshold = 0.88
 min_tokens = 25
-ngram_size = 3
+min_distinct_kinds = 4
 severity = "error" # "error" | "warning"
 
 [cohesion]

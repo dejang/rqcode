@@ -1,10 +1,10 @@
 use super::TsNode;
+use super::normalize::TsNormalizeDialect;
 use super::syntax;
-use crate::ast::item::{CallKind, CallReceiver, CallSite, FieldAccess, LocalBinding, TypeRef};
-use crate::ast::vector::NormToken;
+use crate::ast::item::{CallKind, CallReceiver, CallSite, LocalBinding, TypeRef};
 use crate::ast::{ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
-use crate::lang::common::{BodyAccumulator, LeafClass};
+use crate::lang::common::{self, BodyAccumulator, BodyMetadataWalker, MemberFieldSpec};
 use std::collections::HashMap;
 
 pub(super) use crate::lang::common::ExtractedBody;
@@ -13,6 +13,16 @@ pub(super) struct TsBodyWalker<'a, 'b> {
     tree: &'a SyntaxTree,
     namespace_imports: &'b HashMap<String, ModulePath>,
     acc: BodyAccumulator,
+}
+
+impl<'a> BodyMetadataWalker<'a> for TsBodyWalker<'a, '_> {
+    fn walk_body(&mut self, body: &TsNode<'a>) {
+        self.walk(body, false);
+    }
+
+    fn into_accumulator(self) -> BodyAccumulator {
+        self.acc
+    }
 }
 
 impl<'a, 'b> TsBodyWalker<'a, 'b> {
@@ -27,176 +37,98 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
         }
     }
 
-    pub(super) fn extract(mut self, body: Option<TsNode<'a>>) -> ExtractedBody {
-        if let Some(body) = body {
-            self.walk(&body, false);
-        }
-        self.acc.finish()
+    pub(super) fn extract(self, body: Option<TsNode<'a>>) -> ExtractedBody {
+        common::extract_body_with_dialect(self, TsNormalizeDialect, body)
     }
 
     fn walk(&mut self, node: &TsNode<'a>, in_write_target: bool) {
-        if self.handle_special_node(node) {
-            return;
-        }
-        self.record_structural_token(node, in_write_target);
-
-        if node.is_leaf() {
-            let class = match node.kind().as_ref() {
-                "identifier"
-                | "property_identifier"
-                | "private_property_identifier"
-                | "shorthand_property_identifier"
-                | "shorthand_property_identifier_pattern"
-                | "type_identifier" => LeafClass::Ident,
-                "number" | "string_fragment" | "regex_pattern" | "true" | "false" | "null"
-                | "undefined" => LeafClass::Lit,
-                "(" | ")" | "{" | "}" | "[" | "]" | ";" | "," | "." | ":" | "\"" | "'" | "`"
-                | "?." | "const" | "let" | "var" => LeafClass::Skip,
-                _ => LeafClass::Other,
-            };
-            self.acc.record_leaf(node, class);
-            return;
-        }
-
-        for child in node.children() {
-            self.walk(&child, false);
-        }
-    }
-
-    /// Handle nodes with custom child traversal order; returns `true` when traversal is complete.
-    fn handle_special_node(&mut self, node: &TsNode<'a>) -> bool {
         match node.kind().as_ref() {
-            "comment" => true,
-            "string" => {
-                self.acc.push_token(NormToken::Lit);
-                true
-            }
+            "comment" | "string" => return,
             "assignment_expression" | "augmented_assignment_expression" => {
-                self.walk_assignment(node);
-                true
+                if let Some(left) = node.field("left") {
+                    self.walk(&left, true);
+                }
+                if let Some(right) = node.field("right") {
+                    self.walk(&right, false);
+                }
+                return;
             }
             "update_expression" => {
-                self.acc.push_token(NormToken::Assign);
-                if let Some(op) = node.field("operator") {
-                    self.acc
-                        .push_token(NormToken::Other(op.text().into_owned()));
-                }
                 if let Some(arg) = node.field("argument") {
                     self.walk(&arg, true);
                 }
-                true
+                return;
             }
             "call_expression" => {
-                self.walk_call_expression(node);
-                true
+                self.record_call(node);
+                let func_range = node.field("function").map(|f| f.range());
+                for child in node.children() {
+                    if func_range == Some(child.range()) {
+                        self.walk_call_callee(&child);
+                    } else {
+                        self.walk(&child, false);
+                    }
+                }
+                return;
             }
-            _ => false,
-        }
-    }
-
-    fn record_structural_token(&mut self, node: &TsNode<'a>, in_write_target: bool) {
-        let token = match node.kind().as_ref() {
             "member_expression" => {
-                self.record_field_access(node, in_write_target);
-                Some(NormToken::Field)
+                let spec = MemberFieldSpec {
+                    target_field: "object",
+                    member_field: "property",
+                    ident_kind: "identifier",
+                    is_transparent: |kind| {
+                        matches!(
+                            kind,
+                            "parenthesized_expression"
+                                | "non_null_expression"
+                                | "as_expression"
+                                | "satisfies_expression"
+                        )
+                    },
+                };
+                if let Some((raw_obj, recorded)) =
+                    self.acc
+                        .record_ident_field_access(self.tree, node, spec, in_write_target)
+                {
+                    // Chained access (e.g. `order.customer.name = x`): attribute the write to
+                    // `order.customer` rather than attributing `Customer.name` to `order`.
+                    self.walk(&raw_obj, in_write_target && !recorded);
+                }
+                return;
             }
-            "new_expression" => {
-                self.record_new_expression(node);
-                Some(NormToken::Construct)
-            }
-            "variable_declarator" => {
-                self.record_local_binding(node);
-                Some(NormToken::Bind)
-            }
-            "if_statement" | "ternary_expression" => Some(NormToken::If),
-            "switch_statement" => Some(NormToken::Branch),
-            "switch_case" | "switch_default" => Some(NormToken::BranchArm),
-            "for_statement" | "for_in_statement" | "while_statement" | "do_statement" => {
-                Some(NormToken::Loop)
-            }
-            "return_statement" => Some(NormToken::Return),
-            "arrow_function" | "function_expression" => Some(NormToken::Closure),
-            "try_statement" => Some(NormToken::Try),
-            _ => None,
-        };
-        if let Some(tok) = token {
-            self.acc.push_token(tok);
+            "new_expression" => self.record_new_expression(node),
+            "variable_declarator" => self.record_local_binding(node),
+            _ => {}
         }
-    }
 
-    fn walk_assignment(&mut self, node: &TsNode<'a>) {
-        self.acc.push_token(NormToken::Assign);
-        if let Some(left) = node.field("left") {
-            self.walk(&left, true);
+        if node.is_leaf() {
+            if node.kind().as_ref() == "identifier" {
+                self.acc.push_referenced_ident(node.text().into_owned());
+            }
+            return;
         }
-        if let Some(op) = node.field("operator") {
-            self.acc
-                .push_token(NormToken::Other(op.text().into_owned()));
-        }
-        if let Some(right) = node.field("right") {
-            self.walk(&right, false);
-        }
-    }
 
-    fn walk_call_expression(&mut self, node: &TsNode<'a>) {
-        self.record_call(node);
-        self.acc.push_token(NormToken::Call);
-        let func_range = node.field("function").map(|f| f.range());
+        let keep_write = in_write_target
+            && matches!(
+                node.kind().as_ref(),
+                "parenthesized_expression"
+                    | "non_null_expression"
+                    | "as_expression"
+                    | "satisfies_expression"
+            );
         for child in node.children() {
-            if func_range == Some(child.range()) {
-                self.walk_call_callee(&child);
-            } else {
-                self.walk(&child, false);
-            }
+            self.walk(&child, keep_write);
         }
     }
 
     /// Walk a call callee without recording the invoked method name as a field access.
     fn walk_call_callee(&mut self, node: &TsNode<'a>) {
         if node.kind() == "member_expression" {
-            self.acc.push_token(NormToken::Field);
             for child in node.children() {
                 self.walk(&child, false);
             }
         } else {
             self.walk(node, false);
-        }
-    }
-
-    fn record_field_access(&mut self, node: &TsNode<'a>, is_write: bool) {
-        let Some(prop) = node.field("property") else {
-            return;
-        };
-        let Some(mut current) = node.field("object") else {
-            return;
-        };
-        loop {
-            match current.kind().as_ref() {
-                "member_expression" => {
-                    let Some(next) = current.field("object") else {
-                        return;
-                    };
-                    current = next;
-                }
-                "parenthesized_expression"
-                | "non_null_expression"
-                | "as_expression"
-                | "satisfies_expression" => {
-                    let Some(next) = current.children().find(TsNode::is_named) else {
-                        return;
-                    };
-                    current = next;
-                }
-                _ => break,
-            }
-        }
-        if current.kind() == "identifier" {
-            self.acc.push_field_access(FieldAccess {
-                receiver_param: current.text().into_owned(),
-                field_name: prop.text().into_owned(),
-                is_write,
-                span: self.tree.node_span(node),
-            });
         }
     }
 
@@ -327,27 +259,23 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
     fn record_ident_member_call(&mut self, obj: &TsNode<'a>, callee: String, span: Span) {
         let obj_name = obj.text().into_owned();
         if let Some(ns_mod) = self.namespace_imports.get(&obj_name) {
-            self.acc.push_scoped_ident_ref(callee.clone());
-            self.acc.push_call(CallSite {
-                kind: CallKind::Scoped,
+            self.acc.record_scoped_type_call(
+                CallReceiver::Named(ns_mod.to_string()),
+                None,
                 callee,
-                receiver: Some(CallReceiver::Named(ns_mod.to_string())),
                 span,
-            });
+            );
         } else if obj_name
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_uppercase())
         {
-            self.acc
-                .push_constructed_type(TypeRef::Named(obj_name.clone()));
-            self.acc.push_scoped_ident_ref(callee.clone());
-            self.acc.push_call(CallSite {
-                kind: CallKind::Scoped,
+            self.acc.record_scoped_type_call(
+                CallReceiver::Named(obj_name.clone()),
+                Some(TypeRef::Named(obj_name)),
                 callee,
-                receiver: Some(CallReceiver::Named(obj_name)),
                 span,
-            });
+            );
         } else {
             self.acc.push_call(CallSite {
                 kind: CallKind::Method,
@@ -369,15 +297,12 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
                 .is_some_and(|c| c.is_ascii_uppercase())
         {
             let qualified = format!("{}::{}", ns_node.text(), ty_node.text());
-            self.acc
-                .push_constructed_type(TypeRef::Named(qualified.clone()));
-            self.acc.push_scoped_ident_ref(callee.clone());
-            self.acc.push_call(CallSite {
-                kind: CallKind::Scoped,
+            self.acc.record_scoped_type_call(
+                CallReceiver::Named(qualified.clone()),
+                Some(TypeRef::Named(qualified)),
                 callee,
-                receiver: Some(CallReceiver::Named(qualified)),
                 span,
-            });
+            );
         } else {
             self.acc.push_call(CallSite {
                 kind: CallKind::Method,

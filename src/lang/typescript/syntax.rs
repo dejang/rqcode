@@ -2,7 +2,9 @@ use super::TsNode;
 use crate::ast::ModulePath;
 use crate::ast::item::{TypeRef, Visibility};
 
-pub(super) use crate::lang::common::collect_leaf_idents;
+pub(super) fn collect_leaf_idents(node: &TsNode<'_>, out: &mut Vec<String>) {
+    crate::lang::common::collect_leaf_idents(node, "identifier", out);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestRunnerKind {

@@ -481,7 +481,7 @@ impl<'a> RustExtractor<'a> {
             .and_then(|t| syntax::extract_base_type(&t).0);
 
         let ExtractedBody {
-            body_tokens,
+            body_tree,
             field_accesses,
             calls,
             constructed_types,
@@ -500,7 +500,7 @@ impl<'a> RustExtractor<'a> {
             role,
             params,
             return_type,
-            body_tokens,
+            body_tree,
             field_accesses,
             calls,
             constructed_types,

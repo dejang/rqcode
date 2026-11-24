@@ -1,7 +1,9 @@
 use super::TsNode;
 use crate::ast::item::{CallReceiver, ParamAccess, TypeRef};
 
-pub(super) use crate::lang::common::collect_leaf_idents;
+pub(super) fn collect_leaf_idents(node: &TsNode<'_>, out: &mut Vec<String>) {
+    crate::lang::common::collect_leaf_idents(node, "identifier", out);
+}
 
 pub(super) fn extract_pattern_ident(node: &TsNode<'_>) -> Option<String> {
     match node.kind().as_ref() {
@@ -27,6 +29,57 @@ pub(super) fn rust_scoped_receiver(ty_path: String) -> Option<CallReceiver> {
         Some(CallReceiver::SelfType)
     } else {
         Some(CallReceiver::Named(ty_path))
+    }
+}
+
+/// Split a Rust `scoped_identifier` / `scoped_type_identifier` into `(prefix_segments, name)`
+/// using the CST `path`/`name` fields so turbofish type arguments (`Vec::<std::string::String>::new`)
+/// and qualified trait paths (`<T as std::ops::Add>::add`) are never corrupted by `"::"` splitting.
+pub(super) fn split_scoped_path(node: &TsNode<'_>) -> Option<(Vec<String>, String)> {
+    if !matches!(
+        node.kind().as_ref(),
+        "scoped_identifier" | "scoped_type_identifier"
+    ) {
+        return None;
+    }
+    let name = node.field("name")?.text().trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let mut prefix = Vec::new();
+    if let Some(path) = node.field("path") {
+        collect_path_segments(&path, &mut prefix);
+    }
+    Some((prefix, name))
+}
+
+fn collect_path_segments(node: &TsNode<'_>, out: &mut Vec<String>) {
+    match node.kind().as_ref() {
+        "scoped_identifier" | "scoped_type_identifier" => {
+            if let Some(path) = node.field("path") {
+                collect_path_segments(&path, out);
+            }
+            if let Some(name) = node.field("name") {
+                let text = name.text();
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+            }
+        }
+        "generic_type" => {
+            if let Some(ty) = node.field("type") {
+                collect_path_segments(&ty, out);
+            }
+        }
+        "bracketed_type" => {}
+        _ => {
+            let text = node.text();
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
     }
 }
 

@@ -22,7 +22,7 @@ include = [
 [dependencies]
 ast-grep-config = "0.51"
 ast-grep-core = "0.51"
-ast-grep-language = { version = "0.51", default-features = false, features = ["tree-sitter-rust", "tree-sitter-typescript"] }
+ast-grep-language = { version = "0.51", default-features = false, features = ["tree-sitter-rust", "tree-sitter-swift", "tree-sitter-typescript"] }
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 rayon = "1"

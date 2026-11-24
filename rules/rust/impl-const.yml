@@ -1,0 +1,18 @@
+id: impl-const
+language: rust
+severity: error
+message: "Associated constant in an inherent `impl` block: behavioural values belong in constructor configuration, struct fields, or function arguments rather than hardcoded `const` items."
+rule:
+  kind: const_item
+  inside:
+    kind: declaration_list
+    inside:
+      kind: impl_item
+      not:
+        has:
+          field: trait
+          regex: '.'
+  not:
+    inside:
+      kind: function_item
+      stopBy: end

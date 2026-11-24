@@ -1,0 +1,8 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "split-impl"
+file = "Sources/Shop/Order.swift"
+message_contains = "Order"
+related_files = ["Sources/Shop/OrderHelpers.swift"]
+related_contains = ["Order.formattedSummary"]

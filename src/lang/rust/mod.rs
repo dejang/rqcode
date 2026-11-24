@@ -1,6 +1,7 @@
 mod body;
 mod extract;
 mod macro_tokens;
+mod normalize;
 mod syntax;
 
 use self::extract::RustExtractor;
@@ -145,6 +146,7 @@ impl LanguageFrontend for RustFrontend {
 mod tests {
     use super::*;
     use crate::ast::item::{ImportKind, ParamAccess, TypeRef};
+    use crate::ast::similarity::{EligibilityConfig, SimilarityCorpus};
 
     fn extract_rust(rel_path: &str, src: &str) -> FileAst {
         let tree = SyntaxTree::parse(rel_path, rel_path, rust_language_spec(), src);
@@ -165,9 +167,9 @@ mod tests {
             "crate::ast"
         );
         assert_eq!(
-            f.module_path(Path::new("."), Path::new("src/ast/vector.rs"))
+            f.module_path(Path::new("."), Path::new("src/ast/similarity/mod.rs"))
                 .to_string(),
-            "crate::ast::vector"
+            "crate::ast::similarity"
         );
         assert_eq!(
             f.file_role(Path::new("tests/e2e.rs")),
@@ -253,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_renamed_variables_to_identical_token_streams() {
+    fn normalizes_renamed_variables_to_identical_similarity_score() {
         let src = r"
 fn calc_a(price: u64, tax: u64) -> u64 {
     if price > 100 {
@@ -271,7 +273,55 @@ fn calc_b(cost: u64, fee: u64) -> u64 {
 ";
         let ast = extract_rust("src/math.rs", src);
         assert_eq!(ast.functions.len(), 2);
-        assert_eq!(ast.functions[0].body_tokens, ast.functions[1].body_tokens);
+        let mut corpus = SimilarityCorpus::new(EligibilityConfig {
+            min_nodes: 5,
+            min_distinct_kinds: 2,
+        });
+        assert!(corpus.add_unit(0, &ast.functions[0].body_tree));
+        assert!(corpus.add_unit(1, &ast.functions[1].body_tree));
+        let matches = corpus.similar_pairs(0.99);
+        assert_eq!(matches.len(), 1);
+        assert!((matches[0].score() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn splits_scoped_paths_with_turbofish_and_qualified_traits() {
+        fn visit(node: &TsNode<'_>, out: &mut Vec<(Vec<String>, String)>) {
+            if let Some(split) = syntax::split_scoped_path(node) {
+                out.push(split);
+                return;
+            }
+            for child in node.children() {
+                visit(&child, out);
+            }
+        }
+
+        let src = r"
+fn demo<T: std::ops::Add<Output = T>>(a: T, b: T) -> Vec<String> {
+    let _ = <T as std::ops::Add>::add(a, b);
+    let _: Option<&dyn ::std::fmt::Debug> = None;
+    Vec::<std::string::String>::new()
+}
+";
+        let tree = SyntaxTree::parse("src/paths.rs", "src/paths.rs", rust_language_spec(), src);
+        let mut results = Vec::new();
+        visit(&tree.root(), &mut results);
+
+        assert!(
+            results.contains(&(vec!["Vec".to_string()], "new".to_string())),
+            "expected turbofish Vec::<...>::new -> ([\"Vec\"], \"new\"), got {results:?}"
+        );
+        assert!(
+            results.contains(&(Vec::new(), "add".to_string())),
+            "expected qualified trait <T as Add>::add -> ([], \"add\"), got {results:?}"
+        );
+        assert!(
+            results.contains(&(
+                vec!["std".to_string(), "fmt".to_string()],
+                "Debug".to_string()
+            )),
+            "expected ::std::fmt::Debug -> ([\"std\", \"fmt\"], \"Debug\"), got {results:?}"
+        );
     }
 
     #[test]

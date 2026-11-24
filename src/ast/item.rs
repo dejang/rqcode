@@ -1,5 +1,5 @@
 use crate::ast::ModulePath;
-use crate::ast::vector::NormalizedAst;
+use crate::ast::similarity::NormalizedTree;
 use crate::diagnostic::Span;
 
 /// Language-agnostic reference to a type in declarations and expressions.
@@ -227,7 +227,7 @@ pub struct FunctionDecl {
     pub role: FunctionRole,
     pub params: Vec<ParamDecl>,
     pub return_type: Option<TypeRef>,
-    pub body_tokens: NormalizedAst,
+    pub body_tree: NormalizedTree,
     pub field_accesses: Vec<FieldAccess>,
     pub calls: Vec<CallSite>,
     pub constructed_types: Vec<TypeRef>,

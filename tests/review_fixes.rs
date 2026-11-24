@@ -2,7 +2,7 @@ use rqcode::ast::codebase::Codebase;
 use rqcode::ast::item::{
     FieldDecl, FieldInit, FunctionDecl, FunctionRole, TypeDecl, TypeKind, TypeRef, Visibility,
 };
-use rqcode::ast::vector::NormalizedAst;
+use rqcode::ast::similarity::NormalizedTree;
 use rqcode::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
 use rqcode::config::Config;
 use rqcode::diagnostic::Span;
@@ -65,7 +65,7 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
             role: FunctionRole::Test,
             params: Vec::new(),
             return_type: None,
-            body_tokens: NormalizedAst::default(),
+            body_tree: NormalizedTree::default(),
             field_accesses: Vec::new(),
             calls: Vec::new(),
             constructed_types: vec![TypeRef::Named("Vault".into())],

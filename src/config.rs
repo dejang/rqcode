@@ -1,3 +1,4 @@
+use crate::ast::similarity::{EligibilityConfig, SimilarityParams};
 use crate::diagnostic::Severity;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -123,20 +124,36 @@ pub struct SimilarityConfig {
     pub enabled: bool,
     pub function_threshold: f64,
     pub test_threshold: f64,
+    /// Minimum folded normalized AST node count required before comparing a function or test.
     pub min_tokens: usize,
-    pub ngram_size: usize,
+    /// Minimum distinct structural kinds / operators / callees (`TKS`) required for eligibility.
+    pub min_distinct_kinds: usize,
     pub severity: Severity,
 }
 
 impl Default for SimilarityConfig {
     fn default() -> Self {
+        let eligibility = EligibilityConfig::default();
         Self {
             enabled: true,
             function_threshold: 0.85,
             test_threshold: 0.88,
-            min_tokens: 25,
-            ngram_size: 3,
+            min_tokens: eligibility.min_nodes,
+            min_distinct_kinds: eligibility.min_distinct_kinds,
             severity: Severity::Error,
+        }
+    }
+}
+
+impl SimilarityConfig {
+    #[must_use]
+    pub fn to_params(&self) -> SimilarityParams {
+        SimilarityParams {
+            eligibility: EligibilityConfig {
+                min_nodes: self.min_tokens,
+                min_distinct_kinds: self.min_distinct_kinds,
+            },
+            ..SimilarityParams::default()
         }
     }
 }
@@ -292,7 +309,7 @@ mod tests {
         let config = Config::from_toml(toml).expect("valid partial TOML");
         assert!((config.similarity.function_threshold - 0.92).abs() < f64::EPSILON);
         assert_eq!(config.similarity.min_tokens, 40);
-        assert_eq!(config.similarity.ngram_size, 3);
+        assert_eq!(config.similarity.min_distinct_kinds, 4);
         assert!(config.cohesion.enabled);
         assert!(config.test_coupling.enabled);
         assert_eq!(

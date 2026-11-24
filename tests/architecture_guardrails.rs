@@ -124,7 +124,10 @@ fn ast_and_rules_never_depend_on_concrete_languages() -> Result<(), Box<dyn Erro
     let forbidden = [
         "ast_grep_language",
         "crate::lang::rust",
+        "crate::lang::swift",
         "crate::lang::typescript",
+        "crate::lang::{",
+        "super::lang::",
         "\"main.rs\"",
         "\"lib.rs\"",
         "Visibility::Crate",
@@ -136,18 +139,49 @@ fn ast_and_rules_never_depend_on_concrete_languages() -> Result<(), Box<dyn Erro
     for path in &rs_files {
         let content = std::fs::read_to_string(path)?;
         let relative = path.strip_prefix(manifest_dir).unwrap_or(path);
-        for (idx, line) in content
-            .lines()
-            .take_while(|line| !line.trim_start().starts_with("#[cfg(test)]"))
-            .enumerate()
-        {
+        let mut pending_cfg_test = false;
+        let mut cfg_test_depth: usize = 0;
+
+        for (idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if cfg_test_depth > 0 {
+                for ch in trimmed.chars() {
+                    if ch == '{' {
+                        cfg_test_depth += 1;
+                    } else if ch == '}' {
+                        cfg_test_depth = cfg_test_depth.saturating_sub(1);
+                    }
+                }
+                continue;
+            }
+            if trimmed.starts_with("#[cfg(test)]") {
+                pending_cfg_test = true;
+                continue;
+            }
+            if pending_cfg_test {
+                if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+                    continue;
+                }
+                let opens = trimmed.chars().filter(|&c| c == '{').count();
+                let closes = trimmed.chars().filter(|&c| c == '}').count();
+                if opens > 0 {
+                    cfg_test_depth = opens.saturating_sub(closes);
+                    pending_cfg_test = false;
+                    continue;
+                }
+                if trimmed.ends_with(';') {
+                    pending_cfg_test = false;
+                    continue;
+                }
+                continue;
+            }
             for needle in forbidden {
                 if line.contains(needle) {
                     violations.push(format!(
                         "{}:{}: forbidden reference `{needle}` in `{}`",
                         relative.display(),
                         idx + 1,
-                        line.trim()
+                        trimmed
                     ));
                 }
             }

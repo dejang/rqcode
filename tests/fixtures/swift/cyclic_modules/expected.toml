@@ -1,0 +1,6 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "cyclic-module-dependency"
+file = "Sources/Alpha/Alpha.swift"
+related_files = ["Sources/Beta/Beta.swift"]

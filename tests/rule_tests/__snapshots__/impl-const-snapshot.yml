@@ -1,0 +1,147 @@
+id: impl-const
+snapshots:
+  "mod inner {\n    pub struct Service;\n    impl Service {\n        const LIMIT: usize = 10;\n    }\n}\n":
+    labels:
+    - source: "const LIMIT: usize = 10;"
+      style: primary
+      start: 63
+      end: 87
+    - source: |-
+        impl Service {
+                const LIMIT: usize = 10;
+            }
+      style: secondary
+      start: 40
+      end: 93
+    - source: |-
+        {
+                const LIMIT: usize = 10;
+            }
+      style: secondary
+      start: 53
+      end: 93
+  "pub struct Cache<T>(T);\nimpl<T> Cache<T>\nwhere\n    T: Clone,\n{\n    const CAPACITY: usize = 64;\n}\n":
+    labels:
+    - source: "const CAPACITY: usize = 64;"
+      style: primary
+      start: 67
+      end: 94
+    - source: |-
+        impl<T> Cache<T>
+        where
+            T: Clone,
+        {
+            const CAPACITY: usize = 64;
+        }
+      style: secondary
+      start: 24
+      end: 96
+    - source: |-
+        {
+            const CAPACITY: usize = 64;
+        }
+      style: secondary
+      start: 61
+      end: 96
+  "pub struct Probe;\nimpl Probe {\n    #[allow(dead_code)]\n    const _: () = ();\n}\n":
+    labels:
+    - source: "const _: () = ();"
+      style: primary
+      start: 59
+      end: 76
+    - source: |-
+        impl Probe {
+            #[allow(dead_code)]
+            const _: () = ();
+        }
+      style: secondary
+      start: 18
+      end: 78
+    - source: |-
+        {
+            #[allow(dead_code)]
+            const _: () = ();
+        }
+      style: secondary
+      start: 29
+      end: 78
+  "pub struct Probe;\nimpl Probe {\n    const WIDTH: f32 = 24.0;\n}\n":
+    labels:
+    - source: "const WIDTH: f32 = 24.0;"
+      style: primary
+      start: 35
+      end: 59
+    - source: |-
+        impl Probe {
+            const WIDTH: f32 = 24.0;
+        }
+      style: secondary
+      start: 18
+      end: 61
+    - source: |-
+        {
+            const WIDTH: f32 = 24.0;
+        }
+      style: secondary
+      start: 29
+      end: 61
+  "pub struct Probe;\nimpl Probe {\n    pub const MAX_RETRIES: usize = 3;\n}\n":
+    labels:
+    - source: "pub const MAX_RETRIES: usize = 3;"
+      style: primary
+      start: 35
+      end: 68
+    - source: |-
+        impl Probe {
+            pub const MAX_RETRIES: usize = 3;
+        }
+      style: secondary
+      start: 18
+      end: 70
+    - source: |-
+        {
+            pub const MAX_RETRIES: usize = 3;
+        }
+      style: secondary
+      start: 29
+      end: 70
+  "pub struct Probe;\nimpl Probe {\n    pub(crate) const EPS: f64 = 1e-9;\n}\n":
+    labels:
+    - source: "pub(crate) const EPS: f64 = 1e-9;"
+      style: primary
+      start: 35
+      end: 68
+    - source: |-
+        impl Probe {
+            pub(crate) const EPS: f64 = 1e-9;
+        }
+      style: secondary
+      start: 18
+      end: 70
+    - source: |-
+        {
+            pub(crate) const EPS: f64 = 1e-9;
+        }
+      style: secondary
+      start: 29
+      end: 70
+  "pub trait Service {}\nimpl dyn Service {\n    const TIMEOUT_MS: u64 = 500;\n}\n":
+    labels:
+    - source: "const TIMEOUT_MS: u64 = 500;"
+      style: primary
+      start: 44
+      end: 72
+    - source: |-
+        impl dyn Service {
+            const TIMEOUT_MS: u64 = 500;
+        }
+      style: secondary
+      start: 21
+      end: 74
+    - source: |-
+        {
+            const TIMEOUT_MS: u64 = 500;
+        }
+      style: secondary
+      start: 38
+      end: 74

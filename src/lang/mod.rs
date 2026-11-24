@@ -1,5 +1,6 @@
 pub(crate) mod common;
 pub mod rust;
+pub mod swift;
 pub mod typescript;
 
 use crate::ast::{FileAst, FileRole, LanguageId, LanguageSpec, ModulePath, SyntaxTree};
@@ -52,6 +53,7 @@ impl LanguageRegistry {
         let mut registry = Self::empty();
         registry.register(Box::new(rust::RustFrontend));
         registry.register(Box::new(typescript::TypeScriptFrontend));
+        registry.register(Box::new(swift::SwiftFrontend::new()));
         registry
     }
 
@@ -104,7 +106,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_registry_resolves_rust_files_and_ignores_unknown_extensions() {
+    fn default_registry_resolves_builtin_languages_and_ignores_unknown_extensions() {
         let registry = LanguageRegistry::with_defaults();
         let rs = registry.frontend_for_path(Path::new("src/main.rs"));
         assert_eq!(rs.map(LanguageFrontend::id), Some(LanguageId::new("rust")));
@@ -113,6 +115,8 @@ mod tests {
             ts.map(LanguageFrontend::id),
             Some(LanguageId::new("typescript"))
         );
+        let sw = registry.frontend_for_path(Path::new("Sources/Shop/Order.swift"));
+        assert_eq!(sw.map(LanguageFrontend::id), Some(LanguageId::new("swift")));
         assert!(registry.frontend_for_path(Path::new("README.md")).is_none());
         assert_eq!(
             registry.resolve_language("Rust").map(|s| s.id()),
@@ -130,6 +134,14 @@ mod tests {
             registry.resolve_language("ts").map(|s| s.id()),
             Some(LanguageId::new("typescript"))
         );
+        assert_eq!(
+            registry.resolve_language("Swift").map(|s| s.id()),
+            Some(LanguageId::new("swift"))
+        );
+        assert_eq!(
+            registry.resolve_language("swift").map(|s| s.id()),
+            Some(LanguageId::new("swift"))
+        );
         assert!(registry.resolve_language("cobol").is_none());
         assert_eq!(
             registry.default_excludes(),
@@ -139,7 +151,12 @@ mod tests {
                 "dist",
                 "build",
                 ".next",
-                "coverage"
+                "coverage",
+                ".build",
+                ".swiftpm",
+                "DerivedData",
+                "Pods",
+                "Carthage",
             ]
         );
     }

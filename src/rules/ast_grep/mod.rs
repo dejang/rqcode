@@ -295,6 +295,7 @@ mod tests {
         assert!(ids.contains(&"no-dbg-macro"));
         assert!(ids.contains(&"no-redundant-wrapper"));
         assert!(ids.contains(&"no-private-forwarder"));
+        assert!(ids.contains(&"impl-const"));
 
         let src = r#"
 pub fn prod_fn() {
@@ -431,6 +432,53 @@ rule:
             &registry,
         );
         assert!(matches!(bad_lang, Err(AstGrepRuleError::ParseYaml { .. })));
+    }
+
+    #[test]
+    fn const_rules_partition_module_local_and_inherent_impl_constants() {
+        let registry = LanguageRegistry::with_defaults();
+        let rules: Vec<AstGrepYamlRule> = load_embedded_rules(&registry)
+            .expect("embedded YAML rules")
+            .into_iter()
+            .filter(|r| matches!(r.id(), "module-const" | "local-const" | "impl-const"))
+            .collect();
+        assert_eq!(rules.len(), 3);
+
+        let src = r#"
+const MOD_C: usize = 1;
+pub trait Named { const NAME: &'static str; }
+pub struct Probe;
+impl Named for Probe { const NAME: &'static str = "probe"; }
+impl Probe {
+    const IMPL_C: usize = 2;
+    fn method(&self) -> usize {
+        const METHOD_C: usize = 3;
+        METHOD_C
+    }
+}
+fn scoped() -> usize {
+    struct Local;
+    impl Local { const FN_IMPL_C: usize = 4; }
+    Local::FN_IMPL_C
+}
+"#;
+        let codebase = parse_rust_codebase("src/consts.rs", src);
+        let cfg = Config::default();
+        let mut hits: Vec<(usize, String)> = rules
+            .iter()
+            .flat_map(|r| r.check(&codebase, &cfg))
+            .map(|d| (d.span().start_line(), d.rule_id().to_string()))
+            .collect();
+        hits.sort();
+        assert_eq!(
+            hits,
+            vec![
+                (2, "module-const".to_string()),
+                (7, "impl-const".to_string()),
+                (9, "local-const".to_string()),
+                (15, "local-const".to_string()),
+            ]
+        );
     }
 
     #[test]

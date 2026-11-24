@@ -1,0 +1,97 @@
+id: impl-const
+valid:
+  - |
+    const MAX_LOG_BYTES: usize = 5_000_000;
+  - |
+    pub struct Probe;
+    impl Probe {
+        fn step(&self) -> f32 {
+            const STEP: f32 = 0.25;
+            STEP
+        }
+    }
+  - |
+    fn scoped() {
+        struct Local;
+        impl Local {
+            const STEP: f32 = 0.25;
+        }
+    }
+  - |
+    pub trait Named {
+        const NAME: &'static str;
+        const VERSION: u32 = 1;
+    }
+  - |
+    pub struct Probe;
+    impl Named for Probe {
+        const NAME: &'static str = "probe";
+    }
+  - |
+    pub struct Probe;
+    impl core::fmt::Named for Probe {
+        const NAME: &'static str = "probe";
+    }
+  - |
+    pub struct Probe;
+    impl Named<u32> for Probe {
+        const NAME: &'static str = "probe";
+    }
+  - |
+    pub struct FixedBuf<const N: usize>([u8; N]);
+    impl<const N: usize> FixedBuf<N> {
+        pub fn capacity(&self) -> usize {
+            N
+        }
+    }
+  - |
+    pub struct Probe {
+        width: f32,
+    }
+    impl Probe {
+        pub const fn width(&self) -> f32 {
+            self.width
+        }
+    }
+invalid:
+  - |
+    pub struct Probe;
+    impl Probe {
+        const WIDTH: f32 = 24.0;
+    }
+  - |
+    pub struct Probe;
+    impl Probe {
+        pub const MAX_RETRIES: usize = 3;
+    }
+  - |
+    pub struct Probe;
+    impl Probe {
+        pub(crate) const EPS: f64 = 1e-9;
+    }
+  - |
+    pub struct Cache<T>(T);
+    impl<T> Cache<T>
+    where
+        T: Clone,
+    {
+        const CAPACITY: usize = 64;
+    }
+  - |
+    mod inner {
+        pub struct Service;
+        impl Service {
+            const LIMIT: usize = 10;
+        }
+    }
+  - |
+    pub trait Service {}
+    impl dyn Service {
+        const TIMEOUT_MS: u64 = 500;
+    }
+  - |
+    pub struct Probe;
+    impl Probe {
+        #[allow(dead_code)]
+        const _: () = ();
+    }

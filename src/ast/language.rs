@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Canonical identifier for a source language (e.g., `"rust"`, `"typescript"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LanguageId(&'static str);
 
 impl LanguageId {

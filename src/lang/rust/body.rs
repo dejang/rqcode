@@ -1,18 +1,26 @@
 use super::TsNode;
 use super::macro_tokens::{MacroTokenData, MacroTokenScanner};
+use super::normalize::RustNormalizeDialect;
 use super::syntax;
 use crate::ast::SyntaxTree;
-use crate::ast::item::{
-    CallKind, CallReceiver, CallSite, FieldAccess, FieldInit, LocalBinding, TypeRef,
-};
-use crate::ast::vector::NormToken;
-use crate::lang::common::{BodyAccumulator, LeafClass};
+use crate::ast::item::{CallKind, CallReceiver, CallSite, FieldInit, LocalBinding, TypeRef};
+use crate::lang::common::{self, BodyAccumulator, BodyMetadataWalker, MemberFieldSpec};
 
 pub(super) use crate::lang::common::ExtractedBody;
 
 pub(super) struct BodyWalker<'a> {
     tree: &'a SyntaxTree,
     acc: BodyAccumulator,
+}
+
+impl<'a> BodyMetadataWalker<'a> for BodyWalker<'a> {
+    fn walk_body(&mut self, body: &TsNode<'a>) {
+        self.walk(body, false);
+    }
+
+    fn into_accumulator(self) -> BodyAccumulator {
+        self.acc
+    }
 }
 
 impl<'a> BodyWalker<'a> {
@@ -23,25 +31,16 @@ impl<'a> BodyWalker<'a> {
         }
     }
 
-    pub(super) fn extract(mut self, body: Option<TsNode<'a>>) -> ExtractedBody {
-        if let Some(body) = body {
-            self.walk(&body, false);
-        }
-        self.acc.finish()
+    pub(super) fn extract(self, body: Option<TsNode<'a>>) -> ExtractedBody {
+        common::extract_body_with_dialect(self, RustNormalizeDialect, body)
     }
 
     fn walk(&mut self, node: &TsNode<'a>, in_write_target: bool) {
-        let kind = node.kind();
-        match kind.as_ref() {
+        match node.kind().as_ref() {
             "line_comment" | "block_comment" => return,
             "assignment_expression" | "compound_assignment_expr" => {
-                self.acc.push_token(NormToken::Assign);
                 if let Some(left) = node.field("left") {
                     self.walk(&left, true);
-                }
-                if let Some(op) = node.field("operator") {
-                    self.acc
-                        .push_token(NormToken::Other(op.text().into_owned()));
                 }
                 if let Some(right) = node.field("right") {
                     self.walk(&right, false);
@@ -50,23 +49,30 @@ impl<'a> BodyWalker<'a> {
             }
             "reference_expression" => {
                 let is_mut_ref = node.children().any(|c| c.kind() == "mutable_specifier");
-                self.acc.push_token(if is_mut_ref {
-                    NormToken::RefMut
-                } else {
-                    NormToken::Ref
-                });
                 if let Some(val) = node.field("value") {
                     self.walk(&val, in_write_target || is_mut_ref);
                 }
                 return;
             }
             "field_expression" => {
-                self.record_field_access(node, in_write_target);
-                self.acc.push_token(NormToken::Field);
+                let spec = MemberFieldSpec {
+                    target_field: "value",
+                    member_field: "field",
+                    ident_kind: "identifier",
+                    is_transparent: |kind| kind == "parenthesized_expression",
+                };
+                if let Some((raw_value, recorded)) =
+                    self.acc
+                        .record_ident_field_access(self.tree, node, spec, in_write_target)
+                {
+                    // Chained access (e.g. `order.customer.name = x`): attribute the write to
+                    // `order.customer` rather than attributing `Customer::name` to `order`.
+                    self.walk(&raw_value, in_write_target && !recorded);
+                }
+                return;
             }
             "call_expression" => {
                 self.record_call(node);
-                self.acc.push_token(NormToken::Call);
                 let func_range = node.field("function").map(|f| f.range());
                 for child in node.children() {
                     if func_range == Some(child.range()) {
@@ -82,79 +88,27 @@ impl<'a> BodyWalker<'a> {
                     self.acc.push_scoped_ident_ref(name.text().into_owned());
                 }
             }
-            "struct_expression" => {
-                self.record_struct_init(node);
-                self.acc.push_token(NormToken::Construct);
-            }
-            "let_declaration" => {
-                self.record_local_binding(node);
-                self.acc.push_token(NormToken::Bind);
-            }
-            "macro_invocation" => {
-                self.record_macro_invocation(node);
-                self.acc.push_token(NormToken::Macro);
-            }
-            "if_expression" => self.acc.push_token(NormToken::If),
-            "match_expression" => self.acc.push_token(NormToken::Branch),
-            "match_arm" => self.acc.push_token(NormToken::BranchArm),
-            "for_expression" | "while_expression" | "loop_expression" => {
-                self.acc.push_token(NormToken::Loop);
-            }
-            "return_expression" => self.acc.push_token(NormToken::Return),
-            "closure_expression" => self.acc.push_token(NormToken::Closure),
-            "try_expression" => self.acc.push_token(NormToken::Try),
+            "struct_expression" => self.record_struct_init(node),
+            "let_declaration" => self.record_local_binding(node),
+            "macro_invocation" => self.record_macro_invocation(node),
             _ => {}
         }
 
         if node.is_leaf() {
-            let class =
-                match kind.as_ref() {
-                    "identifier"
-                    | "field_identifier"
-                    | "type_identifier"
-                    | "shorthand_field_identifier"
-                    | "lifetime" => LeafClass::Ident,
-                    "integer_literal" | "float_literal" | "string_literal" | "string_content"
-                    | "raw_string_literal" | "char_literal" | "boolean_literal" | "true"
-                    | "false" => LeafClass::Lit,
-                    "(" | ")" | "{" | "}" | "[" | "]" | ";" | "," | "." | ":" | "::" | "\""
-                    | "'" => LeafClass::Skip,
-                    _ => LeafClass::Other,
-                };
-            self.acc.record_leaf(node, class);
+            if node.kind().as_ref() == "identifier" {
+                self.acc.push_referenced_ident(node.text().into_owned());
+            }
             return;
         }
 
+        let keep_write = in_write_target && node.kind() == "parenthesized_expression";
         for child in node.children() {
-            self.walk(&child, false);
-        }
-    }
-
-    fn record_field_access(&mut self, node: &TsNode<'a>, is_write: bool) {
-        let Some(field) = node.field("field") else {
-            return;
-        };
-        let Some(mut current) = node.field("value") else {
-            return;
-        };
-        while current.kind() == "field_expression" {
-            let Some(next) = current.field("value") else {
-                return;
-            };
-            current = next;
-        }
-        if current.kind() == "identifier" {
-            self.acc.push_field_access(FieldAccess {
-                receiver_param: current.text().into_owned(),
-                field_name: field.text().into_owned(),
-                is_write,
-                span: self.tree.node_span(node),
-            });
+            self.walk(&child, keep_write);
         }
     }
 
     fn record_macro_invocation(&mut self, node: &TsNode<'a>) {
-        self.acc.collect_scoped_idents(node);
+        self.acc.collect_scoped_idents(node, "identifier");
         if let Some(tt) = node.children().find(|c| c.kind() == "token_tree") {
             let MacroTokenData {
                 field_accesses,
@@ -168,11 +122,10 @@ impl<'a> BodyWalker<'a> {
     }
 
     /// Walk the callee expression of a `call_expression` without recording the method name itself
-    /// as a struct field access, while preserving the normalized token stream.
+    /// as a struct field access.
     fn walk_call_callee(&mut self, node: &TsNode<'a>) {
         match node.kind().as_ref() {
             "field_expression" => {
-                self.acc.push_token(NormToken::Field);
                 for child in node.children() {
                     self.walk(&child, false);
                 }
@@ -317,13 +270,11 @@ impl<'a> BodyWalker<'a> {
                 }
             }
             "scoped_identifier" => {
-                let text = func_node.text();
-                let parts: Vec<&str> = text.split("::").filter(|s| !s.is_empty()).collect();
-                if let Some((&callee, prefix)) = parts.split_last() {
-                    if matches!(prefix, ["super" | "self"]) {
+                if let Some((prefix, callee)) = syntax::split_scoped_path(&func_node) {
+                    if prefix.len() == 1 && matches!(prefix[0].as_str(), "super" | "self") {
                         self.acc.push_call(CallSite {
                             kind: CallKind::SameModule,
-                            callee: callee.to_string(),
+                            callee,
                             receiver: None,
                             span,
                         });
@@ -331,7 +282,7 @@ impl<'a> BodyWalker<'a> {
                     }
                     let normalized: Vec<&str> = prefix
                         .iter()
-                        .copied()
+                        .map(String::as_str)
                         .filter(|&s| s != "self" && s != "super")
                         .collect();
                     let ty_path = normalized.join("::");
@@ -346,7 +297,7 @@ impl<'a> BodyWalker<'a> {
                     }
                     self.acc.push_call(CallSite {
                         kind: CallKind::Scoped,
-                        callee: callee.to_string(),
+                        callee,
                         receiver: syntax::rust_scoped_receiver(ty_path),
                         span,
                     });
@@ -411,16 +362,16 @@ fn infer_expr_origin(node: &TsNode<'_>) -> (Option<TypeRef>, Option<String>) {
                     (None, None)
                 }
                 "scoped_identifier" => {
-                    let text = func_node.text();
-                    let parts: Vec<&str> = text.split("::").filter(|s| !s.is_empty()).collect();
-                    let Some((&callee, prefix)) = parts.split_last() else {
+                    let Some((prefix, callee)) = syntax::split_scoped_path(&func_node) else {
                         return (None, None);
                     };
-                    if let Some(&owner) = prefix.last()
+                    if let Some(owner) = prefix.last()
                         && owner.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                     {
-                        if matches!(owner, "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell")
-                            && callee == "new"
+                        if matches!(
+                            owner.as_str(),
+                            "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell"
+                        ) && callee == "new"
                             && let Some(args) = node.field("arguments")
                             && let Some(first_arg) = args.children().find(TsNode::is_named)
                         {
@@ -428,7 +379,7 @@ fn infer_expr_origin(node: &TsNode<'_>) -> (Option<TypeRef>, Option<String>) {
                         }
                         return (Some(syntax::rust_type_ref(prefix.join("::"))), None);
                     }
-                    (None, Some(callee.to_string()))
+                    (None, Some(callee))
                 }
                 _ => (None, None),
             }

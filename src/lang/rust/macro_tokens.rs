@@ -72,14 +72,15 @@ impl<'a> MacroTokenScanner<'a> {
         }
 
         let ident = nodes[start].text().into_owned();
+        let after_tf = skip_turbofish(nodes, start + 1);
 
-        if start + 1 < nodes.len()
-            && is_delimited_tree(&nodes[start + 1], "{")
-            && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        if after_tf < nodes.len()
+            && is_delimited_tree(&nodes[after_tf], "{")
+            && starts_ascii_upper(&ident)
         {
-            self.record_struct_fields(&ident, &nodes[start + 1]);
-            self.scan(&nodes[start + 1]);
-            return start + 2;
+            self.record_struct_fields(&ident, &nodes[after_tf]);
+            self.scan(&nodes[after_tf]);
+            return after_tf + 1;
         }
 
         if start + 2 < nodes.len()
@@ -89,7 +90,6 @@ impl<'a> MacroTokenScanner<'a> {
             return self.consume_dot_chain(nodes, start, &ident);
         }
 
-        let after_tf = skip_turbofish(nodes, start + 1);
         if after_tf < nodes.len() && is_delimited_tree(&nodes[after_tf], "(") {
             self.calls.push(CallSite {
                 kind: CallKind::Free,
@@ -134,10 +134,7 @@ impl<'a> MacroTokenScanner<'a> {
                     .filter(|&s| s != "self" && s != "super")
                     .collect();
                 let ty_path = normalized.join("::");
-                let is_type_ctor = normalized
-                    .last()
-                    .and_then(|s| s.chars().next())
-                    .is_some_and(|c| c.is_ascii_uppercase());
+                let is_type_ctor = normalized.last().is_some_and(|s| starts_ascii_upper(s));
                 if is_type_ctor {
                     let ty_ref = syntax::rust_type_ref(ty_path.as_str());
                     if !self.constructed_types.contains(&ty_ref) {
@@ -161,11 +158,14 @@ impl<'a> MacroTokenScanner<'a> {
                 }
                 return next;
             }
-        } else if idx < nodes.len() && is_delimited_tree(&nodes[idx], "{") {
+        } else if after_tf < nodes.len()
+            && is_delimited_tree(&nodes[after_tf], "{")
+            && parts.last().is_some_and(|s| starts_ascii_upper(s))
+        {
             let full_path = parts.join("::");
-            self.record_struct_fields(&full_path, &nodes[idx]);
-            self.scan(&nodes[idx]);
-            return idx + 1;
+            self.record_struct_fields(&full_path, &nodes[after_tf]);
+            self.scan(&nodes[after_tf]);
+            return after_tf + 1;
         }
 
         idx
@@ -259,22 +259,30 @@ impl<'a> MacroTokenScanner<'a> {
     }
 }
 
-fn is_delimited_tree(node: &TsNode<'_>, open: &str) -> bool {
+pub(super) fn starts_ascii_upper(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+pub(super) fn is_delimited_tree(node: &TsNode<'_>, open: &str) -> bool {
     node.kind() == "token_tree" && node.text().starts_with(open)
 }
 
-fn skip_turbofish(nodes: &[TsNode<'_>], idx: usize) -> usize {
-    if idx + 1 >= nodes.len() || nodes[idx].text() != "::" || nodes[idx + 1].text() != "<" {
+fn is_angle_run(node: &TsNode<'_>, ch: u8) -> bool {
+    let t = node.text();
+    !t.is_empty() && t.bytes().all(|b| b == ch)
+}
+
+pub(super) fn skip_turbofish(nodes: &[TsNode<'_>], idx: usize) -> usize {
+    if idx + 1 >= nodes.len() || nodes[idx].text() != "::" || !is_angle_run(&nodes[idx + 1], b'<') {
         return idx;
     }
     let mut depth = 0usize;
     let mut cur = idx + 1;
     while cur < nodes.len() {
-        let t = nodes[cur].text();
-        if t == "<" {
-            depth += 1;
-        } else if t == ">" {
-            depth = depth.saturating_sub(1);
+        if is_angle_run(&nodes[cur], b'<') {
+            depth += nodes[cur].text().len();
+        } else if is_angle_run(&nodes[cur], b'>') {
+            depth = depth.saturating_sub(nodes[cur].text().len());
             if depth == 0 {
                 return cur + 1;
             }

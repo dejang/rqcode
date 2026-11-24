@@ -1,0 +1,19 @@
+rules = ["test-coupling"]
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "Tests/AppTests/VaultTests.swift"
+message_contains = "Vault.rawSecret"
+related_files = ["Sources/App/Vault.swift"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "Tests/AppTests/VaultTests.swift"
+message_contains = "secretKey"
+related_files = ["Sources/App/Vault.swift"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "Sources/App/Vault.swift"
+message_contains = "debugReset"
+related_files = ["Tests/AppTests/VaultTests.swift"]

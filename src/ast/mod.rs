@@ -1,7 +1,7 @@
 pub mod codebase;
 pub mod item;
 pub mod language;
-pub mod vector;
+pub mod similarity;
 
 pub use self::language::{CommentStyle, LanguageGrammar, LanguageId, LanguageSpec};
 
@@ -14,7 +14,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Logical module/namespace path (e.g., `crate::ast::vector` or `src::models::order`).
+/// Logical module/namespace path (e.g., `crate::ast::similarity` or `src::models::order`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModulePath(Vec<String>);
 

@@ -3,7 +3,7 @@ use rqcode::ast::item::{
     ExportDecl, FunctionDecl, FunctionRole, ImportDecl, ImportKind, ParamAccess, ParamDecl,
     TypeDecl, TypeKind, TypeRef, Visibility,
 };
-use rqcode::ast::vector::NormalizedAst;
+use rqcode::ast::similarity::NormalizedTree;
 use rqcode::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
 use rqcode::config::Config;
 use rqcode::diagnostic::Span;
@@ -45,7 +45,7 @@ fn make_fn_with_param(
             access: ParamAccess::Owned,
         }],
         return_type: None,
-        body_tokens: NormalizedAst::default(),
+        body_tree: NormalizedTree::default(),
         field_accesses: Vec::new(),
         calls: Vec::new(),
         constructed_types: Vec::new(),

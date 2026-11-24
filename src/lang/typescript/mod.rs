@@ -1,6 +1,7 @@
 mod body;
 mod extract;
 mod imports;
+mod normalize;
 mod syntax;
 
 use self::extract::TypeScriptExtractor;
@@ -159,6 +160,7 @@ mod tests {
         CallKind, CallReceiver, FunctionRole, ImportKind, ParamAccess, TypeKind, TypeRef,
         Visibility,
     };
+    use crate::ast::similarity::{AstKind, EligibilityConfig, NodeLabel, SimilarityCorpus};
     use crate::config::Config;
     use crate::rules::Rule;
     use crate::rules::cohesion::CohesionRule;
@@ -464,7 +466,7 @@ describe("Order suite", () => {
     }
 
     #[test]
-    fn normalizes_typescript_tokens_across_renamed_vars_and_distinguishes_loops() {
+    fn normalizes_typescript_trees_across_renamed_vars_and_distinguishes_loops() {
         let src = r"
 function calcA(price: number, tax: number): number {
     const subtotal = price + tax;
@@ -491,15 +493,31 @@ function calcLoop(items: number[]): number {
 }
 ";
         let (_, ast) = parse_ts("src/math.ts", src);
-        let tokens_a = ast.functions[0].body_tokens.tokens();
-        let tokens_b = ast.functions[1].body_tokens.tokens();
-        let tokens_loop = ast.functions[2].body_tokens.tokens();
+        let tree_a = &ast.functions[0].body_tree;
+        let tree_b = &ast.functions[1].body_tree;
+        let tree_loop = &ast.functions[2].body_tree;
 
-        assert_eq!(tokens_a, tokens_b);
-        assert_ne!(tokens_a, tokens_loop);
-        assert!(tokens_a.contains(&"@bind".to_string()));
-        assert!(tokens_a.contains(&"@if".to_string()));
-        assert!(tokens_a.contains(&"@return".to_string()));
-        assert!(tokens_loop.contains(&"@loop".to_string()));
+        let has_kind = |tree: &crate::ast::similarity::NormalizedTree, kind: AstKind| {
+            tree.nodes()
+                .iter()
+                .any(|n| n.label == NodeLabel::Struct(kind))
+        };
+        assert!(has_kind(tree_a, AstKind::Bind));
+        assert!(has_kind(tree_a, AstKind::If));
+        assert!(has_kind(tree_a, AstKind::Return));
+        assert!(has_kind(tree_loop, AstKind::Loop));
+
+        let mut corpus = SimilarityCorpus::new(EligibilityConfig {
+            min_nodes: 5,
+            min_distinct_kinds: 2,
+        });
+        assert!(corpus.add_unit(0, tree_a));
+        assert!(corpus.add_unit(1, tree_b));
+        assert!(corpus.add_unit(2, tree_loop));
+
+        let matches = corpus.similar_pairs(0.85);
+        assert_eq!(matches.len(), 1);
+        assert_eq!((matches[0].left_id(), matches[0].right_id()), (0, 1));
+        assert!((matches[0].score() - 1.0).abs() < 1e-12);
     }
 }

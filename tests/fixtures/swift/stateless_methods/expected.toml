@@ -1,0 +1,13 @@
+rules = ["cohesion"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "Sources/Shop/TextInjector.swift"
+message_contains = "TextInjector.normalizeLineEndings` takes no instance receiver and does not return `TextInjector`; either behavior does not belong to this concept or the state is improperly defined"
+related_files = ["Sources/Shop/TextInjector.swift"]
+
+[[diagnostics]]
+rule = "stateless-impl-method"
+file = "Sources/Shop/TextInjector.swift"
+message_contains = "TextInjector.isTrustedProcess` takes no instance receiver and does not return `TextInjector`; either behavior does not belong to this concept or the state is improperly defined"
+related_files = ["Sources/Shop/TextInjector.swift"]
