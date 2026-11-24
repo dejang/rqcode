@@ -116,6 +116,8 @@ Core rules operate exclusively on the resolved language-agnostic `Codebase` grap
 | `duplicate-function` | Production functions with near-identical normalized AST structure (4-stage pipeline: sibling-folded boilerplate & structural diversity filter, callee/operator-preserving `NormalizedTree` with consistent parameterized renaming, prefix-filtered Merkle subtree Jaccard retrieval, and weighted Zhang-Shasha Tree Edit Distance verification) |
 | `overlapping-tests` | Redundant tests exercising largely the same operations |
 
+See [docs/similarity.md](docs/similarity.md) for the literature survey, crates/algorithms evaluated, pipeline architecture, and design rationale.
+
 ### Embedded & Custom `ast-grep` YAML Rules (`rules/`)
 
 `build.rs` embeds all YAML rules under `rules/` directly into the binary at compile time. You can layer project-specific YAML rules on top via `ast_grep.rules_dir` (same rule ID overrides the built-in) or disable individual/all built-ins.
