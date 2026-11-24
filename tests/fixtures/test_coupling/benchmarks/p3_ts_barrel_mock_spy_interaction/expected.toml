@@ -1,0 +1,29 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-bypasses-public-surface"
+file = "src/app/checkout.test.ts"
+line = 2
+message_contains = "applyVipDiscount"
+related_files = ["src/billing/internal/discountPipeline.ts"]
+
+[[diagnostics]]
+rule = "test-mocks-internal-collaborator"
+file = "src/app/checkout.test.ts"
+line = 5
+message_contains = "discountPipeline"
+related_files = ["src/billing/internal/discountPipeline.ts"]
+
+[[diagnostics]]
+rule = "test-spies-on-sut"
+file = "src/app/checkout.test.ts"
+line = 12
+message_contains = "validateItems"
+related_files = ["src/billing/checkoutService.ts"]
+
+[[diagnostics]]
+rule = "interaction-only-test"
+file = "src/app/checkout.test.ts"
+line = 10
+message_contains = "orchestrates discount pipeline"

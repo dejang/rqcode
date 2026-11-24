@@ -1,15 +1,19 @@
 mod bind;
 mod model;
 mod resolve;
+mod surface;
+mod surface_build;
 
 pub use self::model::{
-    ExternalFuncUsage, FileId, FuncId, IndexedFunc, IndexedType, ResolvedFieldInit, ResolvedParam,
-    TypeId, TypeTestProfile,
+    ExternalFuncUsage, FileId, FuncId, IndexedFunc, IndexedType, ResolvedFieldInit,
+    ResolvedInterfaceImpl, ResolvedParam, TypeId, TypeTestProfile,
 };
+pub use self::surface::{EffectiveVisibility, PublicSurface};
 
 use self::bind::FunctionBinder;
+use self::surface_build::SurfaceBuilder;
 use crate::ast::item::{ImportKind, ParamAccess};
-use crate::ast::{FileAst, FileRole, SyntaxTree};
+use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -24,7 +28,10 @@ pub struct Codebase {
     free_funcs_by_name: HashMap<String, Vec<FuncId>>,
     func_param_types: Vec<HashSet<TypeId>>,
     file_imports_by_local_name: Vec<HashSet<String>>,
+    file_visibility_bypass_modules: Vec<Vec<ModulePath>>,
     is_binary_only_package: bool,
+    interface_impls: Vec<ResolvedInterfaceImpl>,
+    public_surface: PublicSurface,
 }
 
 impl Codebase {
@@ -51,23 +58,32 @@ impl Codebase {
                     file_id,
                     module_path: file.module_path.clone(),
                     decl: decl.clone(),
+                    resolved_base_types: Vec::new(),
                 });
             }
         }
 
+        self::bind::attach_type_bases(&files, &mut types);
         let binder = FunctionBinder::new(&files, &types);
+        let interface_impls = binder.resolve_interface_impls(&files, &types);
         let mut functions = Vec::new();
         let mut free_funcs_by_name: HashMap<String, Vec<FuncId>> = HashMap::new();
 
         for (file_idx, file) in files.iter().enumerate() {
             let file_id = FileId(file_idx);
+            let is_test_file = file.is_test_file();
             for decl in &file.functions {
                 let id = FuncId(functions.len());
-                if decl.is_free_function() && !decl.is_test_code() && !file.is_test_file() {
-                    free_funcs_by_name
-                        .entry(decl.name.clone())
-                        .or_default()
-                        .push(id);
+                if !is_test_file && !decl.is_test_code() {
+                    if decl.is_entrypoint() {
+                        has_binary_entry = true;
+                    }
+                    if decl.is_free_function() {
+                        free_funcs_by_name
+                            .entry(decl.name.clone())
+                            .or_default()
+                            .push(id);
+                    }
                 }
                 functions.push(binder.bind_func(id, file_id, file, decl));
             }
@@ -96,6 +112,21 @@ impl Codebase {
             })
             .collect();
 
+        let file_visibility_bypass_modules = files
+            .iter()
+            .map(|f| {
+                f.imports
+                    .iter()
+                    .filter(|imp| imp.bypasses_visibility)
+                    .filter_map(|imp| imp.resolved_module.clone())
+                    .collect()
+            })
+            .collect();
+
+        let is_binary_only_package = has_binary_entry && !has_lib_root;
+        let public_surface =
+            SurfaceBuilder::new(&files, &types, &functions, is_binary_only_package).build();
+
         Self {
             trees,
             files,
@@ -105,7 +136,10 @@ impl Codebase {
             free_funcs_by_name,
             func_param_types,
             file_imports_by_local_name,
-            is_binary_only_package: has_binary_entry && !has_lib_root,
+            file_visibility_bypass_modules,
+            is_binary_only_package,
+            interface_impls,
+            public_surface,
         }
     }
 
@@ -157,8 +191,25 @@ impl Codebase {
     }
 
     #[must_use]
+    pub fn interface_impls(&self) -> &[ResolvedInterfaceImpl] {
+        &self.interface_impls
+    }
+
+    #[must_use]
+    pub fn public_surface(&self) -> &PublicSurface {
+        &self.public_surface
+    }
+
+    #[must_use]
     pub fn file_imports(&self, file_id: FileId) -> &HashSet<String> {
         &self.file_imports_by_local_name[file_id.0]
+    }
+
+    #[must_use]
+    pub fn file_bypasses_visibility_for(&self, file_id: FileId, target_module: &ModulePath) -> bool {
+        self.file_visibility_bypass_modules[file_id.0]
+            .iter()
+            .any(|mod_path| target_module.is_same_or_child_of(mod_path))
     }
 
     #[must_use]
@@ -344,8 +395,9 @@ mod tests {
     use super::*;
     use crate::ast::ModulePath;
     use crate::ast::item::{
-        CallKind, CallReceiver, CallSite, FieldAccess, FieldDecl, FunctionDecl, FunctionRole,
-        ImportDecl, ImportKind, ParamDecl, TypeDecl, TypeKind, TypeRef, Visibility,
+        CallKind, CallReceiver, CallSite, ConditionalGuard, FieldAccess, FieldDecl,
+        FunctionCouplingFacts, FunctionDecl, FunctionRole, ImportDecl, ImportKind, ImportOrigin,
+        ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
     };
     use crate::ast::similarity::NormalizedTree;
     use crate::lang::rust::rust_language_spec;
@@ -371,11 +423,16 @@ mod tests {
             language: rust.id(),
             member_separator: rust.member_separator(),
             role,
+            is_barrel: false,
+            module_decls: Vec::new(),
             imports,
             exports: Vec::new(),
             types,
+            interface_impls: Vec::new(),
             functions,
             top_level_idents: Vec::new(),
+            test_hooks: Vec::new(),
+            module_mocks: Vec::new(),
             suppressions: Vec::new(),
         };
         (tree, ast)
@@ -384,29 +441,28 @@ mod tests {
     #[test]
     fn resolves_external_free_functions_and_field_mutations_across_modules() {
         let order_type = TypeDecl {
-            name: "Order".to_string(),
-            kind: TypeKind::Struct,
-            visibility: Visibility::Public,
-            in_test_module: false,
-            is_default_export: false,
+            name: "Order".into(), kind: TypeKind::Struct, visibility: Visibility::Public,
+            in_test_module: false, is_default_export: false, has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed, base_types: Vec::new(),
             fields: vec![FieldDecl {
-                name: "total".to_string(),
-                type_name: Some(TypeRef::Named("u64".to_string())),
-                visibility: Visibility::Public,
-                is_mut_ref: false,
-                span: Span::new("src/order.rs", 2, 5, 2, 19),
+                name: "total".into(), type_name: Some(TypeRef::Named("u64".into())),
+                visibility: Visibility::Public, explicit_visibility: false, is_mut_ref: false,
+                conditional_guard: ConditionalGuard::None, span: Span::new("src/order.rs", 2, 5, 2, 19),
             }],
-            annotations: Vec::new(),
-            span: Span::new("src/order.rs", 1, 1, 3, 2),
+            annotations: Vec::new(), span: Span::new("src/order.rs", 1, 1, 3, 2),
         };
 
         let helper = FunctionDecl {
             name: "apply_discount".to_string(),
             owner_type: None,
             is_interface_impl: false,
+            interface_name: None,
             self_receiver: None,
             visibility: Visibility::Public,
+            explicit_visibility: false,
+            is_default_export: false,
             role: FunctionRole::Production,
+            conditional_guard: ConditionalGuard::None,
             params: vec![ParamDecl {
                 name: "order".to_string(),
                 type_name: Some(TypeRef::Named("Ord".to_string())),
@@ -416,7 +472,10 @@ mod tests {
             body_tree: NormalizedTree::default(),
             field_accesses: vec![FieldAccess {
                 receiver_param: "order".to_string(),
+                receiver_is_self: false,
+                receiver_type: None,
                 field_name: "total".to_string(),
+                is_read: false,
                 is_write: true,
                 span: Span::new("src/pricing.rs", 5, 5, 5, 20),
             }],
@@ -426,6 +485,7 @@ mod tests {
             field_inits: Vec::new(),
             referenced_idents: Vec::new(),
             scoped_ident_refs: Vec::new(),
+            coupling: FunctionCouplingFacts::default(),
             span: Span::new("src/pricing.rs", 4, 1, 6, 2),
         };
 
@@ -448,6 +508,8 @@ mod tests {
                 symbol: "Order".into(),
                 alias: Some("Ord".into()),
                 in_test_module: false,
+                bypasses_visibility: false,
+                origin: ImportOrigin::Project,
                 span: Span::new("src/pricing.rs", 1, 1, 1, 35),
             }],
         );
@@ -465,22 +527,22 @@ mod tests {
     #[test]
     fn tests_for_does_not_conflate_same_named_methods_across_unrelated_types() {
         let ty_a = TypeDecl {
-            name: "Alpha".to_string(),
-            kind: TypeKind::Struct,
-            visibility: Visibility::Private,
-            in_test_module: false,
-            is_default_export: false,
-            fields: vec![],
-            annotations: vec![],
-            span: Span::new("src/a.rs", 1, 1, 1, 15),
+            name: "Alpha".into(), kind: TypeKind::Struct, visibility: Visibility::Private,
+            in_test_module: false, is_default_export: false, has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed, base_types: Vec::new(),
+            fields: vec![], annotations: vec![], span: Span::new("src/a.rs", 1, 1, 1, 15),
         };
-        let alpha_new = FunctionDecl {
-            name: "new".to_string(),
-            owner_type: Some("Alpha".to_string()),
+        let stub_fn = |name: &str, owner: Option<&str>, role: FunctionRole, span: Span| FunctionDecl {
+            name: name.to_string(),
+            owner_type: owner.map(str::to_string),
             is_interface_impl: false,
+            interface_name: None,
             self_receiver: None,
             visibility: Visibility::Private,
-            role: FunctionRole::Production,
+            explicit_visibility: false,
+            is_default_export: false,
+            role,
+            conditional_guard: ConditionalGuard::None,
             params: vec![],
             return_type: None,
             body_tree: NormalizedTree::default(),
@@ -491,32 +553,19 @@ mod tests {
             field_inits: vec![],
             referenced_idents: vec![],
             scoped_ident_refs: vec![],
-            span: Span::new("src/a.rs", 2, 1, 2, 15),
+            coupling: FunctionCouplingFacts::default(),
+            span,
         };
-        let unrelated_test = FunctionDecl {
-            name: "tests_beta".to_string(),
-            owner_type: None,
-            is_interface_impl: false,
-            self_receiver: None,
-            visibility: Visibility::Private,
-            role: FunctionRole::Test,
-            params: vec![],
-            return_type: None,
-            body_tree: NormalizedTree::default(),
-            field_accesses: vec![],
-            calls: vec![CallSite {
-                kind: CallKind::Scoped,
-                callee: "new".to_string(),
-                receiver: Some(CallReceiver::Named("Beta".to_string())),
-                span: Span::new("src/b.rs", 5, 5, 5, 16),
-            }],
-            constructed_types: vec![TypeRef::Named("Beta".to_string())],
-            local_bindings: vec![],
-            field_inits: vec![],
-            referenced_idents: vec![],
-            scoped_ident_refs: vec![],
-            span: Span::new("src/b.rs", 4, 1, 6, 2),
-        };
+        let alpha_new = stub_fn("new", Some("Alpha"), FunctionRole::Production, Span::new("src/a.rs", 2, 1, 2, 15));
+        let mut unrelated_test = stub_fn("tests_beta", None, FunctionRole::Test, Span::new("src/b.rs", 4, 1, 6, 2));
+        unrelated_test.calls.push(CallSite {
+            kind: CallKind::Scoped,
+            callee: "new".to_string(),
+            receiver: Some(CallReceiver::Named("Beta".to_string())),
+            arg_receivers: Vec::new(),
+            span: Span::new("src/b.rs", 5, 5, 5, 16),
+        });
+        unrelated_test.constructed_types.push(TypeRef::Named("Beta".to_string()));
 
         let (t1, f1) = make_file(
             "src/a.rs",

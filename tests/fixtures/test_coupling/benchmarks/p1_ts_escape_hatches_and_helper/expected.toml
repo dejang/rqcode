@@ -1,0 +1,37 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "src/rateLimiter.test.ts"
+line = 11
+message_contains = "RateLimiter.evictStale"
+related_files = ["src/rateLimiter.ts"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/rateLimiter.test.ts"
+line = 20
+message_contains = "private field `buckets`"
+related_files = ["src/rateLimiter.ts"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/rateLimiter.test.ts"
+line = 29
+message_contains = "private field `buckets`"
+related_files = ["src/rateLimiter.ts"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/rateLimiter.test.ts"
+line = 39
+message_contains = "private field `buckets`"
+related_files = ["src/rateLimiter.ts"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/rateLimiter.test.ts"
+line = 4
+message_contains = "private field `buckets`"
+related_files = ["src/rateLimiter.ts"]

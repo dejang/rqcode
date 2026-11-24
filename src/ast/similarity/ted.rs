@@ -95,8 +95,28 @@ impl TedScratch {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ast::similarity::tree::{AstKind, LitKind, NameSpace, NormalizedTree, TreeBuilder};
+    use crate::ast::similarity::{
+        AstKind, EligibilityConfig, LitKind, NameSpace, NormalizedTree, SimilarityCorpus,
+        SimilarityParams, TreeBuilder,
+    };
+
+    fn pair_tsed(left: &NormalizedTree, right: &NormalizedTree, max_ted_work: usize) -> Option<f64> {
+        let params = SimilarityParams {
+            eligibility: EligibilityConfig {
+                min_nodes: 1,
+                min_distinct_kinds: 1,
+            },
+            min_candidate_jaccard: 0.01,
+            max_ted_work,
+            ..SimilarityParams::default()
+        };
+        let mut corpus = SimilarityCorpus::with_params(params);
+        assert!(corpus.add_unit(0, left));
+        assert!(corpus.add_unit(1, right));
+        let matches = corpus.similar_pairs(0.01);
+        assert_eq!(matches.len(), 1);
+        matches[0].tsed()
+    }
 
     fn multi_var_body(vars: [&str; 4], callee: &str, mid_insert: bool) -> NormalizedTree {
         let [a, b, c, d] = vars;
@@ -153,73 +173,46 @@ mod tests {
 
     #[test]
     fn weighted_tsed_verifies_reference_distances_renaming_callees_and_work_cap() {
-        let weights = LabelWeights::default();
-        let mut scratch = TedScratch::default();
-
-        // Hand-verified exact distance: `f(a)` vs `g(a)` -> 1 Exact relabel of cost 2.0 out of 4.0 -> TSED 0.5.
+        // Hand-verified exact distance: `f(h(a))` vs `g(h(a))` -> 1 Exact relabel (2.0) out of 7.0 -> TSED 5/7.
         let build_tiny = |callee: &str| {
             let mut tb = TreeBuilder::new();
-            let call = tb.enter(AstKind::Call);
+            let outer = tb.enter(AstKind::Call);
             tb.exact(callee);
+            let inner = tb.enter(AstKind::Call);
+            tb.exact("h");
             tb.symbol(NameSpace::Plain, "a");
-            tb.exit(call);
-            weights.extract_unit(&tb.finish())
+            tb.exit(inner);
+            tb.exit(outer);
+            tb.finish()
         };
         let tiny_f = build_tiny("f");
         let tiny_g = build_tiny("g");
-        let tiny_score = scratch
-            .weighted_tsed(&tiny_f.canonical, &tiny_g.canonical, weights, 100, 1e-12)
-            .expect("tiny trees fit work cap");
+        let tiny_score = pair_tsed(&tiny_f, &tiny_g, 100).expect("tiny trees fit work cap");
+        let expected = 5.0 / 7.0;
         assert!(
-            (tiny_score - 0.5).abs() < 1e-12,
-            "expected exact 0.5 reference TSED, got {tiny_score}"
+            (tiny_score - expected).abs() < 1e-12,
+            "expected exact 5/7 reference TSED, got {tiny_score}"
         );
-        // Tight work cap (< 3*3=9) triggers graceful None fallback.
-        assert!(
-            scratch
-                .weighted_tsed(&tiny_f.canonical, &tiny_g.canonical, weights, 4, 1e-12)
-                .is_none()
-        );
+        // Tight work cap (< 5*5=25) triggers graceful None fallback.
+        assert!(pair_tsed(&tiny_f, &tiny_g, 20).is_none());
 
         // Full bodies: consistent renaming -> 1.0; callee swap pays elevated Exact weight.
-        let a = weights.extract_unit(&multi_var_body(["w", "x", "y", "z"], "compute", false));
-        let b = weights.extract_unit(&multi_var_body(["p", "q", "r", "s"], "compute", false));
-        let c = weights.extract_unit(&multi_var_body(["w", "x", "y", "z"], "render", false));
-        let renamed = scratch
-            .weighted_tsed(&a.canonical, &b.canonical, weights, 160_000, 1e-12)
-            .expect("valid TSED");
-        let swapped = scratch
-            .weighted_tsed(&a.canonical, &c.canonical, weights, 160_000, 1e-12)
-            .expect("valid TSED");
+        let a = multi_var_body(["w", "x", "y", "z"], "compute", false);
+        let b = multi_var_body(["p", "q", "r", "s"], "compute", false);
+        let c = multi_var_body(["w", "x", "y", "z"], "render", false);
+        let renamed = pair_tsed(&a, &b, 160_000).expect("valid TSED");
+        let swapped = pair_tsed(&a, &c, 160_000).expect("valid TSED");
         assert!((renamed - 1.0).abs() < 1e-12);
         assert!(swapped < renamed && swapped > 0.85);
     }
 
     #[test]
     fn mid_body_type3_insertion_stays_localized_and_is_symmetric() {
-        let weights = LabelWeights::default();
-        let mut scratch = TedScratch::default();
-        let orig = weights.extract_unit(&multi_var_body(["a", "b", "c", "d"], "compute", false));
-        let inserted = weights.extract_unit(&multi_var_body(["p", "q", "r", "s"], "compute", true));
+        let orig = multi_var_body(["a", "b", "c", "d"], "compute", false);
+        let inserted = multi_var_body(["p", "q", "r", "s"], "compute", true);
 
-        let ab = scratch
-            .weighted_tsed(
-                &orig.canonical,
-                &inserted.canonical,
-                weights,
-                160_000,
-                1e-12,
-            )
-            .expect("valid TSED");
-        let ba = scratch
-            .weighted_tsed(
-                &inserted.canonical,
-                &orig.canonical,
-                weights,
-                160_000,
-                1e-12,
-            )
-            .expect("valid TSED");
+        let ab = pair_tsed(&orig, &inserted, 160_000).expect("valid TSED");
+        let ba = pair_tsed(&inserted, &orig, 160_000).expect("valid TSED");
         assert!((ab - ba).abs() < 1e-12, "TSED must be symmetric");
         // Even with 4 live variables crossing the mid-body insertion, same-namespace symbol
         // relabel cost keeps the edit localized so TSED stays comfortably high.

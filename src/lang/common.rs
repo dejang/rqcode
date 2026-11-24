@@ -1,6 +1,6 @@
 use crate::ast::item::{
-    CallKind, CallReceiver, CallSite, FieldAccess, FieldInit, FunctionDecl, FunctionRole,
-    LocalBinding, ParamAccess, ParamDecl, TypeRef, Visibility,
+    CallKind, CallReceiver, CallSite, ConditionalGuard, FieldAccess, FieldInit, FunctionCouplingFacts,
+    FunctionDecl, FunctionRole, LocalBinding, ParamAccess, ParamDecl, TypeRef, Visibility,
 };
 use crate::ast::similarity::{AstKind, LitKind, NameSpace, NormalizedTree, TreeBuilder};
 use crate::ast::{FileRole, LanguageSpec, SyntaxTree};
@@ -21,6 +21,7 @@ pub(crate) struct MemberFieldSpec {
     pub(crate) target_field: &'static str,
     pub(crate) member_field: &'static str,
     pub(crate) ident_kind: &'static str,
+    pub(crate) self_kind: Option<&'static str>,
     pub(crate) is_transparent: fn(&str) -> bool,
 }
 
@@ -28,8 +29,11 @@ pub(crate) struct FunctionHeader {
     pub(crate) name: String,
     pub(crate) owner_type: Option<String>,
     pub(crate) is_interface_impl: bool,
+    pub(crate) interface_name: Option<TypeRef>,
     pub(crate) self_receiver: Option<ParamAccess>,
     pub(crate) visibility: Visibility,
+    pub(crate) explicit_visibility: bool,
+    pub(crate) is_default_export: bool,
     pub(crate) role: FunctionRole,
     pub(crate) params: Vec<ParamDecl>,
     pub(crate) return_type: Option<TypeRef>,
@@ -45,6 +49,7 @@ pub(crate) struct ExtractedBody {
     pub(crate) field_inits: Vec<FieldInit>,
     pub(crate) referenced_idents: Vec<String>,
     pub(crate) scoped_ident_refs: Vec<String>,
+    pub(crate) coupling: FunctionCouplingFacts,
 }
 
 impl ExtractedBody {
@@ -53,9 +58,13 @@ impl ExtractedBody {
             name: header.name,
             owner_type: header.owner_type,
             is_interface_impl: header.is_interface_impl,
+            interface_name: header.interface_name,
             self_receiver: header.self_receiver,
             visibility: header.visibility,
+            explicit_visibility: header.explicit_visibility,
+            is_default_export: header.is_default_export,
             role: header.role,
+            conditional_guard: ConditionalGuard::None,
             params: header.params,
             return_type: header.return_type,
             body_tree: self.body_tree,
@@ -66,8 +75,26 @@ impl ExtractedBody {
             field_inits: self.field_inits,
             referenced_idents: self.referenced_idents,
             scoped_ident_refs: self.scoped_ident_refs,
+            coupling: self.coupling,
             span,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessMode {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl AccessMode {
+    pub(crate) const fn is_read(self) -> bool {
+        matches!(self, Self::Read | Self::ReadWrite)
+    }
+
+    pub(crate) const fn is_write(self) -> bool {
+        matches!(self, Self::Write | Self::ReadWrite)
     }
 }
 
@@ -80,21 +107,26 @@ impl BodyAccumulator {
     pub(crate) fn set_body_tree(&mut self, tree: NormalizedTree) {
         self.out.body_tree = tree;
     }
+    pub(crate) const fn coupling_mut(&mut self) -> &mut FunctionCouplingFacts {
+        &mut self.out.coupling
+    }
 
     pub(crate) fn push_field_access(&mut self, access: FieldAccess) {
         self.out.field_accesses.push(access);
     }
 
     /// Record a direct field access when `node.field(spec.target_field)` unwraps through
-    /// transparent wrappers to a plain identifier (`spec.ident_kind`). Returns
-    /// `Some((raw_target, recorded))` where `recorded` is `true` if a direct access was recorded
-    /// (caller walks `raw_target` without propagating write-ness), or `false` for chained accesses.
+    /// transparent wrappers to a plain identifier (`spec.ident_kind`) or `self`/`this`
+    /// (`spec.self_kind`), and record an unresolved access for chained targets (e.g., `a.b.c`)
+    /// so production field reads remain observable. Returns `Some((raw_target, recorded))` where
+    /// `recorded` is `true` for a direct receiver access.
     pub(crate) fn record_ident_field_access<'a>(
         &mut self,
         tree: &SyntaxTree,
         node: &CstNode<'a>,
         spec: MemberFieldSpec,
-        is_write: bool,
+        mode: AccessMode,
+        fallback_type: Option<TypeRef>,
     ) -> Option<(CstNode<'a>, bool)> {
         let raw_target = node.field(spec.target_field)?;
         let mut target = raw_target.clone();
@@ -107,19 +139,26 @@ impl BodyAccumulator {
             };
             target = inner;
         }
-        if target.kind() == spec.ident_kind {
-            if let Some(field) = node.field(spec.member_field) {
-                self.push_field_access(FieldAccess {
-                    receiver_param: target.text().into_owned(),
-                    field_name: field.text().into_owned(),
-                    is_write,
-                    span: tree.node_span(node),
-                });
-            }
-            Some((raw_target, true))
-        } else {
-            Some((raw_target, false))
+        let target_kind = target.kind();
+        let is_self = spec.self_kind.is_some_and(|k| target_kind == k);
+        let direct = is_self || target_kind == spec.ident_kind;
+        if let Some(field) = node.field(spec.member_field) {
+            let receiver_param = if direct && !is_self {
+                target.text().into_owned()
+            } else {
+                String::new()
+            };
+            self.push_field_access(FieldAccess {
+                receiver_param,
+                receiver_is_self: is_self,
+                receiver_type: if direct { None } else { fallback_type },
+                field_name: field.text().into_owned(),
+                is_read: mode.is_read(),
+                is_write: mode.is_write(),
+                span: tree.node_span(node),
+            });
         }
+        Some((raw_target, direct))
     }
 
     pub(crate) fn push_call(&mut self, call: CallSite) {
@@ -151,6 +190,7 @@ impl BodyAccumulator {
         receiver: CallReceiver,
         constructed: Option<TypeRef>,
         callee: String,
+        arg_receivers: Vec<Option<CallReceiver>>,
         span: Span,
     ) {
         if let Some(ty_ref) = constructed {
@@ -161,6 +201,7 @@ impl BodyAccumulator {
             kind: CallKind::Scoped,
             callee,
             receiver: Some(receiver),
+            arg_receivers,
             span,
         });
     }
@@ -171,15 +212,13 @@ impl BodyAccumulator {
         calls: Vec<CallSite>,
         constructed_types: Vec<TypeRef>,
         field_inits: Vec<FieldInit>,
+        scoped_ident_refs: Vec<String>,
     ) {
         self.out.field_accesses.extend(field_accesses);
         self.out.calls.extend(calls);
         self.out.constructed_types.extend(constructed_types);
         self.out.field_inits.extend(field_inits);
-    }
-
-    pub(crate) fn collect_scoped_idents(&mut self, node: &CstNode<'_>, ident_kind: &str) {
-        collect_leaf_idents(node, ident_kind, &mut self.out.scoped_ident_refs);
+        self.out.scoped_ident_refs.extend(scoped_ident_refs);
     }
 
     pub(crate) fn finish(mut self) -> ExtractedBody {
@@ -536,27 +575,20 @@ pub(crate) fn classify_file_role(
     lib_roots: &[&str],
     bin_entries: &[&str],
 ) -> FileRole {
-    if let Some(first) = relative_path
-        .components()
-        .next()
-        .and_then(|c| c.as_os_str().to_str())
-        && integration_dirs.contains(&first)
-    {
+    let first = relative_path.components().next().and_then(|c| c.as_os_str().to_str());
+    if first.is_some_and(|f| integration_dirs.contains(&f)) {
         return FileRole::IntegrationTest;
     }
-    let Some(file_name) = relative_path.file_name().and_then(|n| n.to_str()) else {
+    let Some(name) = relative_path.file_name().and_then(|n| n.to_str()) else {
         return FileRole::Module;
     };
-    for &suffix in unit_test_suffixes {
-        if file_name.ends_with(suffix) {
-            return FileRole::UnitTest;
-        }
+    if unit_test_suffixes.iter().any(|s| name.ends_with(s)) {
+        FileRole::UnitTest
+    } else if lib_roots.contains(&name) {
+        FileRole::LibraryRoot
+    } else if bin_entries.contains(&name) {
+        FileRole::BinaryEntrypoint
+    } else {
+        FileRole::Module
     }
-    if lib_roots.contains(&file_name) {
-        return FileRole::LibraryRoot;
-    }
-    if bin_entries.contains(&file_name) {
-        return FileRole::BinaryEntrypoint;
-    }
-    FileRole::Module
 }

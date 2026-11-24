@@ -1,0 +1,23 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-bypasses-public-surface"
+file = "src/checkout.rs"
+line = 14
+message_contains = "apply_tier_curve"
+related_files = ["src/discount.rs"]
+
+[[diagnostics]]
+rule = "test-bypasses-public-surface"
+file = "src/checkout.rs"
+line = 20
+message_contains = "QuoteEngine::normalize_cents"
+related_files = ["src/pricing.rs"]
+
+[[diagnostics]]
+rule = "overexposed-for-tests"
+file = "src/pricing.rs"
+line = 17
+message_contains = "QuoteEngine::normalize_cents"
+related_files = ["src/checkout.rs"]

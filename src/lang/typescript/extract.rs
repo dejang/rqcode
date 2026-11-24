@@ -1,10 +1,11 @@
 use super::TsNode;
 use super::body::TsBodyWalker;
-use super::imports::{ExportClauseResult, ImportBatch, ModuleImportParser};
+use super::coupling;
+use super::imports::{self, ExportClauseResult, ImportBatch, ModuleImportParser};
 use super::syntax::{self, TestRunnerKind};
 use crate::ast::item::{
-    ExportDecl, FieldDecl, FunctionDecl, FunctionRole, ImportDecl, ParamAccess, ParamDecl,
-    TypeDecl, TypeKind, TypeRef, Visibility,
+    ConditionalGuard, ExportDecl, FieldDecl, FunctionDecl, FunctionRole, ImportDecl, InterfaceImpl,
+    ModuleMock, ParamAccess, ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
 };
 use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
 use crate::lang::common::FunctionHeader;
@@ -26,8 +27,10 @@ pub(super) struct TypeScriptExtractor<'a> {
     imports: Vec<ImportDecl>,
     exports: Vec<ExportDecl>,
     types: Vec<TypeDecl>,
+    interface_impls: Vec<InterfaceImpl>,
     functions: Vec<FunctionDecl>,
     top_level_idents: Vec<String>,
+    module_mocks: Vec<ModuleMock>,
 }
 
 impl<'a> TypeScriptExtractor<'a> {
@@ -41,15 +44,10 @@ impl<'a> TypeScriptExtractor<'a> {
                 .collect()
         });
         Self {
-            tree,
-            module_path,
-            base_dir,
-            namespace_imports: HashMap::new(),
-            imports: Vec::new(),
-            exports: Vec::new(),
-            types: Vec::new(),
-            functions: Vec::new(),
-            top_level_idents: Vec::new(),
+            tree, module_path, base_dir, namespace_imports: HashMap::new(),
+            imports: Vec::new(), exports: Vec::new(), types: Vec::new(),
+            interface_impls: Vec::new(), functions: Vec::new(),
+            top_level_idents: Vec::new(), module_mocks: Vec::new(),
         }
     }
 
@@ -79,6 +77,8 @@ impl<'a> TypeScriptExtractor<'a> {
         self.top_level_idents.sort_unstable();
         self.top_level_idents.dedup();
 
+        let is_barrel =
+            imports::is_index_barrel(self.tree.relative_path(), &self.imports, &self.exports);
         FileAst {
             path: self.tree.path().to_path_buf(),
             relative_path: self.tree.relative_path().to_path_buf(),
@@ -86,11 +86,16 @@ impl<'a> TypeScriptExtractor<'a> {
             language: self.tree.language_id(),
             member_separator: self.tree.language().member_separator(),
             role,
+            is_barrel,
+            module_decls: Vec::new(),
             imports: self.imports,
             exports: self.exports,
             types: self.types,
+            interface_impls: self.interface_impls,
             functions: self.functions,
             top_level_idents: self.top_level_idents,
+            test_hooks: Vec::new(),
+            module_mocks: self.module_mocks,
             suppressions: self.tree.extract_suppressions(),
         }
     }
@@ -196,6 +201,7 @@ impl<'a> TypeScriptExtractor<'a> {
                         exported_name: String::from("default"),
                         is_default: true,
                         is_wildcard: false,
+                        visibility: Visibility::Public,
                     });
                 }
                 self.mark_local_exported(&sym, is_default);
@@ -220,6 +226,9 @@ impl<'a> TypeScriptExtractor<'a> {
         for func in &mut self.functions {
             if func.owner_type.is_none() && func.name == symbol {
                 func.visibility = Visibility::Public;
+                if is_default {
+                    func.is_default_export = true;
+                }
             }
         }
     }
@@ -244,7 +253,9 @@ impl<'a> TypeScriptExtractor<'a> {
                                     .field("type")
                                     .and_then(|t| syntax::extract_type_ref(&t)),
                                 visibility: syntax::extract_visibility(&child),
+                                explicit_visibility: syntax::has_explicit_visibility(&child),
                                 is_mut_ref: false,
+                                conditional_guard: ConditionalGuard::None,
                                 span: self.tree.node_span(&child),
                             });
                         }
@@ -261,12 +272,23 @@ impl<'a> TypeScriptExtractor<'a> {
             }
         }
 
+        let (base_types, impls) =
+            coupling::extract_class_heritage(node, &name, meta.in_test_context, self.tree);
+        self.interface_impls.extend(impls);
+        let subclass_policy = if node.kind() == "abstract_class_declaration" {
+            SubclassPolicy::Open
+        } else {
+            SubclassPolicy::Closed
+        };
         self.types.push(TypeDecl {
             name,
             kind: TypeKind::Class,
             visibility: meta.visibility,
             in_test_module: meta.in_test_context,
             is_default_export: meta.is_default_export,
+            has_implicit_field_readers: false,
+            subclass_policy,
+            base_types,
             fields,
             annotations,
             span: self.tree.node_span(node),
@@ -300,16 +322,19 @@ impl<'a> TypeScriptExtractor<'a> {
         } else {
             FunctionRole::Production
         };
-        let body =
-            TsBodyWalker::new(self.tree, &self.namespace_imports).extract(node.field("body"));
+        let body = TsBodyWalker::new(self.tree, &self.base_dir, &self.namespace_imports)
+            .extract(node.field("body"));
 
         Some(body.into_function_decl(
             FunctionHeader {
                 name,
                 owner_type: Some(owner_name.to_string()),
                 is_interface_impl: false,
+                interface_name: None,
                 self_receiver,
                 visibility: syntax::extract_visibility(node),
+                explicit_visibility: syntax::has_explicit_visibility(node),
+                is_default_export: false,
                 role,
                 params,
                 return_type,
@@ -334,7 +359,9 @@ impl<'a> TypeScriptExtractor<'a> {
                             .field("type")
                             .and_then(|t| syntax::extract_type_ref(&t)),
                         visibility: Visibility::Public,
+                        explicit_visibility: false,
                         is_mut_ref: false,
+                        conditional_guard: ConditionalGuard::None,
                         span: self.tree.node_span(&child),
                     });
                 }
@@ -346,6 +373,9 @@ impl<'a> TypeScriptExtractor<'a> {
             visibility: meta.visibility,
             in_test_module: meta.in_test_context,
             is_default_export: meta.is_default_export,
+            has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed,
+            base_types: Vec::new(),
             fields,
             annotations: Vec::new(),
             span: self.tree.node_span(node),
@@ -362,6 +392,9 @@ impl<'a> TypeScriptExtractor<'a> {
             visibility: meta.visibility,
             in_test_module: meta.in_test_context,
             is_default_export: meta.is_default_export,
+            has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed,
+            base_types: Vec::new(),
             fields: Vec::new(),
             annotations: Vec::new(),
             span: self.tree.node_span(node),
@@ -401,16 +434,19 @@ impl<'a> TypeScriptExtractor<'a> {
         } else {
             FunctionRole::Production
         };
-        let body =
-            TsBodyWalker::new(self.tree, &self.namespace_imports).extract(node.field("body"));
+        let body = TsBodyWalker::new(self.tree, &self.base_dir, &self.namespace_imports)
+            .extract(node.field("body"));
 
         self.functions.push(body.into_function_decl(
             FunctionHeader {
                 name,
                 owner_type: None,
                 is_interface_impl: false,
+                interface_name: None,
                 self_receiver: None,
                 visibility: meta.visibility,
+                explicit_visibility: meta.visibility == Visibility::Public,
+                is_default_export: meta.is_default_export,
                 role,
                 params,
                 return_type,
@@ -461,7 +497,9 @@ impl<'a> TypeScriptExtractor<'a> {
                     name: param_name.clone(),
                     type_name: type_name.clone(),
                     visibility: syntax::extract_visibility(&child),
+                    explicit_visibility: syntax::has_explicit_visibility(&child),
                     is_mut_ref: false,
+                    conditional_guard: ConditionalGuard::None,
                     span: self.tree.node_span(&child),
                 });
             }
@@ -478,12 +516,16 @@ impl<'a> TypeScriptExtractor<'a> {
         let Some(expr) = node.children().find(TsNode::is_named) else {
             return;
         };
-        if in_test_context
-            && expr.kind() == "call_expression"
-            && let Some(runner_kind) = TestRunnerKind::from_call(&expr)
-        {
-            self.extract_test_runner_call(&expr, runner_kind);
-            return;
+        if in_test_context && expr.kind() == "call_expression" {
+            if let Some(mock) = coupling::detect_module_mock(self.tree, &self.base_dir, &expr, true)
+            {
+                self.module_mocks.push(mock);
+                return;
+            }
+            if let Some(runner_kind) = TestRunnerKind::from_call(&expr) {
+                self.extract_test_runner_call(&expr, runner_kind);
+                return;
+            }
         }
         if !in_test_context {
             syntax::collect_leaf_idents(&expr, &mut self.top_level_idents);
@@ -528,15 +570,18 @@ impl<'a> TypeScriptExtractor<'a> {
             TestRunnerKind::Case => {
                 let name = title.unwrap_or_else(|| String::from("anonymous_test"));
                 let params = self.extract_callable_params(&cb);
-                let body =
-                    TsBodyWalker::new(self.tree, &self.namespace_imports).extract(cb.field("body"));
+                let body = TsBodyWalker::new(self.tree, &self.base_dir, &self.namespace_imports)
+                    .extract(cb.field("body"));
                 self.functions.push(body.into_function_decl(
                     FunctionHeader {
                         name,
                         owner_type: None,
                         is_interface_impl: false,
+                        interface_name: None,
                         self_receiver: None,
                         visibility: Visibility::Private,
+                        explicit_visibility: false,
+                        is_default_export: false,
                         role: FunctionRole::Test,
                         params,
                         return_type: None,

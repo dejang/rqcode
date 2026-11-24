@@ -1,0 +1,30 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/ledger.rs"
+line = 49
+message_contains = "cached_checksum"
+related_files = ["src/ledger.rs"]
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "src/ledger.rs"
+line = 56
+message_contains = "Ledger::recompute_checksum"
+related_files = ["src/ledger.rs"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/ledger.rs"
+line = 62
+message_contains = "private field `0`"
+related_files = ["src/ledger.rs"]
+
+[[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/ledger.rs"
+line = 67
+message_contains = "private field `0`"
+related_files = ["src/ledger.rs"]

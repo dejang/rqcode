@@ -92,7 +92,7 @@ During file extraction, each language frontend runs **Stage 1** once per functio
     Weight-ratio upper-bound prune (within budget) -> weighted DP -> blended score
 ```
 
-### Stage 1 — Principled Normalization (`src/lang/common.rs`, `src/lang/*/normalize.rs`)
+### Stage 1: Principled Normalization (`src/lang/common.rs`, `src/lang/*/normalize.rs`)
 
 A shared bounded-recursion driver (`CstNormalizer`, default `max_depth = 512`) delegates syntax mapping to thin per-language `CstNormalizeDialect` implementations (`RustNormalizeDialect`, `TsNormalizeDialect`, `SwiftNormalizeDialect`). Each body lowers into an arena-allocated `NormalizedTree` (`src/ast/similarity/tree.rs`) with four `NodeLabel` variants:
 
@@ -103,18 +103,18 @@ A shared bounded-recursion driver (`CstNormalizer`, default `max_depth = 512`) d
 
 Dialects canonicalize superficial language quirks without leaking grammar types into core: TypeScript `this` and Swift implicit `self` normalize to `Plain("self")`; Rust macro token trees are normalized in `src/lang/rust/normalize.rs` (using token helpers in `src/lang/rust/macro_tokens.rs`); Swift normalizes shorthand `if let`, nested enum paths, subscripts (`AstKind::Index`), capture lists, and trailing-closure labels.
 
-### Stage 0 — Sibling Folding & Structural Diversity (`src/ast/similarity/tree.rs`)
+### Stage 0: Sibling Folding & Structural Diversity (`src/ast/similarity/tree.rs`)
 
 Before entering the index, `NormalizedTree::eligibility_stats` computes `EligibilityStats` in three linear steps (post-order index build, bottom-up sibling folding, and a diversity DFS over non-folded nodes):
 
-1. **Consecutive identical sibling folding** (adapting token-based repeated-instruction folding from Murakami et al., SCAM 2012, to AST containers): Inside `Block`, `Branch`, `Construct`, `Collection`, and `Call`, consecutive children with identical structural skeletons (ignoring `Symbol` spellings and `Literal` variants, while keeping `Struct` kinds and `Exact` text) are capped at `max_identical_siblings` (default `2`) for size counting. A 12-field constructor (`self.f0 = p0; ... self.f11 = p11;`, 73 raw nodes) folds to 13 effective nodes and is rejected automatically—with zero constructor-name hardcoding.
-2. **Structural diversity (`TKS` — distinct non-trivial kinds/tokens):** Counts distinct `AstKind`s (excluding `Block`, `Arg`, `Other`) plus distinct `NodeLabel::Exact` strings across the remaining (non-folded) nodes. Functions must satisfy both `folded_nodes >= min_nodes` and `distinct_kinds >= min_distinct_kinds` (`EligibilityConfig`, defaults `25` and `4`).
+1. **Consecutive identical sibling folding** (adapting token-based repeated-instruction folding from Murakami et al., SCAM 2012, to AST containers): Inside `Block`, `Branch`, `Construct`, `Collection`, and `Call`, consecutive children with identical structural skeletons (ignoring `Symbol` spellings and `Literal` variants, while keeping `Struct` kinds and `Exact` text) are capped at `max_identical_siblings` (default `2`) for size counting. A 12-field constructor (`self.f0 = p0; ... self.f11 = p11;`, 73 raw nodes) folds to 13 effective nodes and is rejected automatically, with zero constructor-name hardcoding.
+2. **Structural diversity (`TKS`, distinct non-trivial kinds/tokens):** Counts distinct `AstKind`s (excluding `Block`, `Arg`, `Other`) plus distinct `NodeLabel::Exact` strings across the remaining (non-folded) nodes. Functions must satisfy both `folded_nodes >= min_nodes` and `distinct_kinds >= min_distinct_kinds` (`EligibilityConfig`, defaults `25` and `4`).
 
-**Known boundaries:** Because folding only compares consecutive siblings and `NodeLabel::Exact` text is part of both the skeleton hash and the diversity count, Stage 0 folds uniform sibling repetitions—such as field-assignment constructors, literal-keyed tables (`1 => "a", 2 => "b"`), and repeated statement-level calls (e.g., `b.push(x); b.push(y);` or consecutive `Text(...)` views)—but does **not** fold:
+**Known boundaries:** Because folding only compares consecutive siblings and `NodeLabel::Exact` text is part of both the skeleton hash and the diversity count, Stage 0 folds uniform sibling repetitions (such as field-assignment constructors, literal-keyed tables like `1 => "a", 2 => "b"`, and repeated statement-level calls like `b.push(x); b.push(y);` or consecutive `Text(...)` views), but does **not** fold:
 - **Fluent method chains** (`Cfg::builder().field("a", 1).field("b", 2)....build()`), because chained receiver calls normalize as *nested* `Call` nodes rather than siblings; even a uniform fluent chain never folds and can clear the 25/4 thresholds if it has enough distinct kinds.
 - **Dispatch tables keyed by distinct enum variants** (`Status::A => "..."`) or blocks invoking many distinct methods, because each distinct `Exact` string produces a distinct skeleton hash and increments `TKS`.
 
-### Stage 2A — Subtree-Local Merkle Fingerprints (`src/ast/similarity/fingerprint.rs`)
+### Stage 2A: Subtree-Local Merkle Fingerprints (`src/ast/similarity/fingerprint.rs`)
 
 `LabelWeights::extract_unit` runs a pre-order pass followed by a post-order pass to emit both the Stage 2 fingerprint set (`hashes`) and the Stage 3 post-order `CanonicalTree`:
 
@@ -122,7 +122,7 @@ Before entering the index, `NormalizedTree::eligibility_stats` computes `Eligibi
 - **LCA repeat closure:** During bottom-up `SplitMix64` Merkle hashing, open symbol occurrences propagate upward in `open_pool` until reaching the **lowest common ancestor (LCA)** subtree containing both occurrences, where `(local_pos, prev_dist)` is mixed into that subtree's hash once. This enforces 1-to-1 consistent renaming (`x = x + x * x` $\neq$ `d = a + b * c`) and keeps each subtree hash invariant to variables introduced outside that subtree. Worst-case propagation cost is $O(n \cdot h)$ where $h$ is `NormalizedTree` height (`CstNormalizer` caps CST walk depth at `max_depth = 512`, though individual CST nodes can emit multiple structural levels and direct `TreeBuilder` callers are unbounded); in practice this stays near-linear on typical function depths.
 - **Leaf emission policy:** Bare `Symbol` and `Literal` leaves are hashed into their enclosing parent expressions and are **not** emitted as standalone entries in `hashes` (so unrelated calls like `validateEmail(x, 1)` and `renderHeader(x, 1)` share zero bare-symbol/literal overlap). `NodeLabel::Exact` leaves (callees, operators, keywords like `return`/`=`) *are* emitted as standalone fingerprints so shared operations contribute directly to Jaccard.
 
-### Stage 2B — Exact Prefix-Filtered Jaccard Join (`src/ast/similarity/index.rs`)
+### Stage 2B: Exact Prefix-Filtered Jaccard Join (`src/ast/similarity/index.rs`)
 
 Instead of $O(N^2)$ comparisons, `find_jaccard_candidates` implements the **Bayardo (WWW 2007) / SourcererCC (ICSE 2016)** exact set-similarity join:
 
@@ -135,9 +135,9 @@ Because the final blended score is $S = w_J J + w_T T$ with $T \le 1$, any pair 
 
 $$J \ge \frac{\theta - w_T}{w_J}$$
 
-With default weights ($w_J = 0.30$, $w_T = 0.70$), this exact bound yields $\tau = 0.50$ at $\theta = 0.85$ and $\tau = 0.60$ at $\theta = 0.88$—preserving **zero false negatives** relative to the blended score (for example, a deep single-operator mutation can drop Jaccard to $\approx 0.58$ while TSED remains $\approx 0.97$, giving $S \approx 0.855 \ge 0.85$). `min_candidate_jaccard = 0.35` floors $\tau$ as a recall-for-speed guard; note that this floor engages whenever $\theta < 0.70 + 0.30 \times 0.35 = 0.805$, trading the zero-false-negative guarantee for speed at custom thresholds below `0.805`.
+With default weights ($w_J = 0.30$, $w_T = 0.70$), this exact bound yields $\tau = 0.50$ at $\theta = 0.85$ and $\tau = 0.60$ at $\theta = 0.88$, preserving **zero false negatives** relative to the blended score (for example, a deep single-operator mutation can drop Jaccard to $\approx 0.58$ while TSED remains $\approx 0.97$, giving $S \approx 0.855 \ge 0.85$). `min_candidate_jaccard = 0.35` floors $\tau$ as a recall-for-speed guard; note that this floor engages whenever $\theta < 0.70 + 0.30 \times 0.35 = 0.805$, trading the zero-false-negative guarantee for speed at custom thresholds below `0.805`.
 
-### Stage 3 — Weighted Zhang-Shasha TSED Verification (`src/ast/similarity/ted.rs`, `src/ast/similarity/mod.rs`)
+### Stage 3: Weighted Zhang-Shasha TSED Verification (`src/ast/similarity/ted.rs`, `src/ast/similarity/mod.rs`)
 
 Stage 2's deduplicated subtree set can over-score pairs whose shared sub-expressions appear in different control-flow skeletons. Stage 3 runs in parallel across surviving Stage 2B candidates via `rayon` (using `map_init` for per-job reusable `TedScratch` DP buffers):
 
@@ -166,9 +166,9 @@ We evaluated adding a PDG verifier and split the trade-off into two designs:
 During v0.2 design evaluation across 11 Rust, TypeScript, and Swift repositories (54–941 ms per repo), we deferred even the syntactic PDG for four reasons:
 
 - **Precision was the actual problem:** Stages 0–3 cut the 87-file Swift/SwiftUI benchmark from 518 noisy hits to the 4 genuine copy-pasted mock methods (in 54.5 ms) and caught real Type-1, Type-2, and localized Type-3 clones across all three languages.
-- **Reordering trade-off is bounded and understood:** Swapping independent statements leaves the moved statements' own and inner subtree hashes intact (while changing ancestors along the path to the root). Because Stage 3 ordered TSED carries `70%` of the score and moving a subtree of weight $w$ can cost up to $2w$ (delete + insert) plus `0.25` per later symbol whose global `prev` distance shifts, heavy statement permutations can drop below `0.85`—an acceptable trade-off until real missed clones justify a reordering-tolerant verifier.
-- **Per-language scoping semantics are subtle:** Accurate lexical def-use requires tracking Rust pattern destructuring/`&mut`, TypeScript `var` hoisting vs. `let`/`const` block scope, and Swift `guard let` (binds into the *outer* scope) and `inout`. `NormalizedTree` intentionally erases several of those distinctions (such as collapsing `var`/`let`/`const` into `Bind` and Swift `guard` into `If`, even though `&mut` survives as `Exact("&mut")`), so a *faithful* syntactic PDG would require enriching `NormalizedTree` and every language dialect—while an approximate PDG on the current tree would silently miswire edges in those constructs.
-- **Higher-leverage improvements came first in empirical data:** Repositories with many parallel adapters (e.g., dozens of similar engine adapters) suffer from $O(k^2)$ pairwise diagnostic noise—best addressed by **clone-cluster deduplication** (connected components), not a PDG.
+- **Reordering trade-off is bounded and understood:** Swapping independent statements leaves the moved statements' own and inner subtree hashes intact (while changing ancestors along the path to the root). Because Stage 3 ordered TSED carries `70%` of the score and moving a subtree of weight $w$ can cost up to $2w$ (delete + insert) plus `0.25` per later symbol whose global `prev` distance shifts, heavy statement permutations can drop below `0.85`, an acceptable trade-off until real missed clones justify a reordering-tolerant verifier.
+- **Per-language scoping semantics are subtle:** Accurate lexical def-use requires tracking Rust pattern destructuring/`&mut`, TypeScript `var` hoisting vs. `let`/`const` block scope, and Swift `guard let` (binds into the *outer* scope) and `inout`. `NormalizedTree` intentionally erases several of those distinctions (such as collapsing `var`/`let`/`const` into `Bind` and Swift `guard` into `If`, even though `&mut` survives as `Exact("&mut")`), so a *faithful* syntactic PDG would require enriching `NormalizedTree` and every language dialect, whereas an approximate PDG on the current tree would silently miswire edges in those constructs.
+- **Higher-leverage improvements came first in empirical data:** Repositories with many parallel adapters (e.g., dozens of similar engine adapters) suffer from $O(k^2)$ pairwise diagnostic noise, which is best addressed by **clone-cluster deduplication** (connected components), not a PDG.
 
 **Re-evaluation trigger:** If future benchmarks surface genuine missed **reordered Moderate Type-3 clones** (independent statements heavily shuffled or branches inverted in larger functions), an optional Stage 3b syntactic PDG verifier can be added once scoping/control-exit metadata is modeled cleanly in `NormalizedTree`.
 

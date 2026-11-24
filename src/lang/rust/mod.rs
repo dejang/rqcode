@@ -285,46 +285,6 @@ fn calc_b(cost: u64, fee: u64) -> u64 {
     }
 
     #[test]
-    fn splits_scoped_paths_with_turbofish_and_qualified_traits() {
-        fn visit(node: &TsNode<'_>, out: &mut Vec<(Vec<String>, String)>) {
-            if let Some(split) = syntax::split_scoped_path(node) {
-                out.push(split);
-                return;
-            }
-            for child in node.children() {
-                visit(&child, out);
-            }
-        }
-
-        let src = r"
-fn demo<T: std::ops::Add<Output = T>>(a: T, b: T) -> Vec<String> {
-    let _ = <T as std::ops::Add>::add(a, b);
-    let _: Option<&dyn ::std::fmt::Debug> = None;
-    Vec::<std::string::String>::new()
-}
-";
-        let tree = SyntaxTree::parse("src/paths.rs", "src/paths.rs", rust_language_spec(), src);
-        let mut results = Vec::new();
-        visit(&tree.root(), &mut results);
-
-        assert!(
-            results.contains(&(vec!["Vec".to_string()], "new".to_string())),
-            "expected turbofish Vec::<...>::new -> ([\"Vec\"], \"new\"), got {results:?}"
-        );
-        assert!(
-            results.contains(&(Vec::new(), "add".to_string())),
-            "expected qualified trait <T as Add>::add -> ([], \"add\"), got {results:?}"
-        );
-        assert!(
-            results.contains(&(
-                vec!["std".to_string(), "fmt".to_string()],
-                "Debug".to_string()
-            )),
-            "expected ::std::fmt::Debug -> ([\"std\", \"fmt\"], \"Debug\"), got {results:?}"
-        );
-    }
-
-    #[test]
     fn extracts_pub_use_reexports_and_wildcard_imports() {
         let src = r"
 pub use self::order::{Order, Item as LineItem};

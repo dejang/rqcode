@@ -1,6 +1,7 @@
 use rqcode::ast::codebase::Codebase;
 use rqcode::ast::item::{
-    FieldDecl, FieldInit, FunctionDecl, FunctionRole, TypeDecl, TypeKind, TypeRef, Visibility,
+    ConditionalGuard, FieldDecl, FieldInit, FunctionCouplingFacts, FunctionDecl, FunctionRole,
+    SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
 };
 use rqcode::ast::similarity::NormalizedTree;
 use rqcode::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
@@ -38,6 +39,8 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
         language: ts_spec.id(),
         member_separator: ts_spec.member_separator(),
         role: FileRole::Module,
+            is_barrel: false,
+            module_decls: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
         types: vec![TypeDecl {
@@ -46,23 +49,33 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
             visibility: Visibility::Public,
             in_test_module: false,
             is_default_export: false,
+            has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed,
+            base_types: Vec::new(),
             fields: vec![FieldDecl {
                 name: "secret".into(),
                 type_name: None,
                 visibility: Visibility::Private,
+            explicit_visibility: false,
                 is_mut_ref: false,
+                conditional_guard: ConditionalGuard::None,
                 span: Span::new("src/vault.ts", 2, 1, 2, 20),
             }],
             annotations: Vec::new(),
             span: Span::new("src/vault.ts", 1, 1, 3, 2),
         }],
+        interface_impls: Vec::new(),
         functions: vec![FunctionDecl {
             name: "constructs_vault".into(),
             owner_type: None,
             is_interface_impl: false,
+            interface_name: None,
             self_receiver: None,
             visibility: Visibility::Private,
+            explicit_visibility: false,
+            is_default_export: false,
             role: FunctionRole::Test,
+            conditional_guard: ConditionalGuard::None,
             params: Vec::new(),
             return_type: None,
             body_tree: NormalizedTree::default(),
@@ -77,9 +90,12 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
             }],
             referenced_idents: Vec::new(),
             scoped_ident_refs: Vec::new(),
+            coupling: FunctionCouplingFacts::default(),
             span: Span::new("src/vault.ts", 5, 1, 7, 2),
         }],
         top_level_idents: Vec::new(),
+        test_hooks: Vec::new(),
+        module_mocks: Vec::new(),
         suppressions: Vec::new(),
     };
 

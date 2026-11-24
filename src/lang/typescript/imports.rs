@@ -1,6 +1,7 @@
 use super::TsNode;
+use super::coupling;
 use super::syntax;
-use crate::ast::item::{ExportDecl, ImportDecl, ImportKind};
+use crate::ast::item::{ExportDecl, ImportDecl, ImportKind, ImportOrigin, Visibility};
 use crate::ast::{ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
 
@@ -18,6 +19,7 @@ struct ImportSource {
     resolved_module: Option<ModulePath>,
     module_segments: Vec<String>,
     in_test_module: bool,
+    origin: ImportOrigin,
     span: Span,
 }
 
@@ -30,6 +32,8 @@ impl ImportSource {
             symbol,
             alias,
             in_test_module: self.in_test_module,
+            bypasses_visibility: false,
+            origin: self.origin,
             span: self.span.clone(),
         }
     }
@@ -74,6 +78,7 @@ impl<'a> ModuleImportParser<'a> {
         };
         let specifier = syntax::unquote_string(&source_node.text());
         let resolved_module = syntax::resolve_relative_module_path(self.base_dir, &specifier);
+        let origin = coupling::classify_import_origin(&specifier, resolved_module.as_ref());
         let module_segments = resolved_module
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.segments().to_vec());
@@ -81,6 +86,7 @@ impl<'a> ModuleImportParser<'a> {
             resolved_module,
             module_segments,
             in_test_module: in_test_file,
+            origin,
             span: self.tree.node_span(node),
         };
 
@@ -155,6 +161,7 @@ impl<'a> ModuleImportParser<'a> {
                     exported_name,
                     is_default,
                     is_wildcard: false,
+                    visibility: Visibility::Public,
                 });
             }
             return Some(ExportClauseResult {
@@ -178,6 +185,7 @@ impl<'a> ModuleImportParser<'a> {
                     exported_name,
                     is_default: false,
                     is_wildcard: true,
+                    visibility: Visibility::Public,
                 }]
             } else {
                 Vec::new()
@@ -196,6 +204,7 @@ impl<'a> ModuleImportParser<'a> {
                     exported_name: String::new(),
                     is_default: false,
                     is_wildcard: true,
+                    visibility: Visibility::Public,
                 }]
             });
             return Some(ExportClauseResult {
@@ -206,4 +215,29 @@ impl<'a> ModuleImportParser<'a> {
 
         None
     }
+}
+
+pub(super) fn is_index_barrel(
+    rel_path: &std::path::Path,
+    imports: &[ImportDecl],
+    exports: &[ExportDecl],
+) -> bool {
+    let is_index = rel_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s == "index");
+    if !is_index {
+        return false;
+    }
+    if exports.iter().any(|exp| exp.source_module.is_some()) {
+        return true;
+    }
+    let imported_locals: std::collections::HashSet<&str> = imports
+        .iter()
+        .filter(|imp| !imp.in_test_module && imp.resolved_module.is_some())
+        .map(ImportDecl::local_name)
+        .collect();
+    exports
+        .iter()
+        .any(|exp| !exp.symbol.is_empty() && imported_locals.contains(exp.symbol.as_str()))
 }

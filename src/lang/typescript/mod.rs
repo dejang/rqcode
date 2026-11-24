@@ -1,4 +1,5 @@
 mod body;
+mod coupling;
 mod extract;
 mod imports;
 mod normalize;

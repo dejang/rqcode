@@ -1,0 +1,23 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-only-production-field"
+file = "src/renderer.rs"
+line = 15
+message_contains = "last_rendered"
+related_files = ["src/renderer.rs"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/renderer.rs"
+line = 33
+message_contains = "MessageRenderer::snapshot"
+related_files = ["src/renderer.rs"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/renderer.rs"
+line = 38
+message_contains = "MessageRenderer::count_internal_nodes"
+related_files = ["src/renderer.rs"]

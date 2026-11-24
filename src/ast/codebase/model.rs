@@ -1,5 +1,5 @@
 use crate::ast::ModulePath;
-use crate::ast::item::{FunctionDecl, ParamDecl, TypeDecl};
+use crate::ast::item::{FunctionDecl, InterfaceImplRole, ParamDecl, TypeDecl};
 use crate::diagnostic::Span;
 use std::collections::HashMap;
 
@@ -18,6 +18,18 @@ pub struct IndexedType {
     pub file_id: FileId,
     pub module_path: ModulePath,
     pub decl: TypeDecl,
+    pub resolved_base_types: Vec<TypeId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedInterfaceImpl {
+    pub interface_id: Option<TypeId>,
+    pub target_id: Option<TypeId>,
+    pub target_type_name: String,
+    pub file_id: FileId,
+    pub in_test_module: bool,
+    pub role: InterfaceImplRole,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -41,12 +53,17 @@ pub struct IndexedFunc {
     pub member_separator: &'static str,
     pub decl: FunctionDecl,
     pub resolved_owner: Option<TypeId>,
+    pub resolved_interface: Option<TypeId>,
     pub resolved_return_type: Option<TypeId>,
     pub resolved_params: Vec<ResolvedParam>,
     pub resolved_constructions: Vec<TypeId>,
     pub resolved_local_types: HashMap<String, TypeId>,
     pub resolved_call_receivers: Vec<Option<TypeId>>,
+    pub resolved_field_accesses: Vec<Option<TypeId>>,
     pub resolved_field_inits: Vec<ResolvedFieldInit>,
+    pub resolved_escape_targets: Vec<Option<TypeId>>,
+    pub resolved_spy_targets: Vec<Option<TypeId>>,
+    pub resolved_repr_targets: Vec<Option<TypeId>>,
 }
 
 impl IndexedFunc {

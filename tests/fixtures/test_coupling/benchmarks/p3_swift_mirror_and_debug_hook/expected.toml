@@ -1,0 +1,16 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-encapsulation-escape"
+file = "Tests/VaultKitTests/VaultClientTests.swift"
+line = 7
+message_contains = "Mirror"
+related_files = ["Sources/VaultKit/VaultClient.swift"]
+
+[[diagnostics]]
+rule = "production-test-hook"
+file = "Sources/VaultKit/VaultClient.swift"
+line = 7
+message_contains = "lastRawPayload"
+related_files = ["Tests/VaultKitTests/VaultClientTests.swift"]

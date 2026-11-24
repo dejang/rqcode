@@ -1,0 +1,8 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "production-test-hook"
+file = "src/engine.rs"
+line = 5
+message_contains = "cfg!(test)"

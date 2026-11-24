@@ -145,12 +145,15 @@ pub(super) fn extract_navigation_member(nav: &SwiftNode<'_>) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-pub(super) fn extract_visibility(node: &SwiftNode<'_>, default_vis: Visibility) -> Visibility {
+pub(super) fn extract_visibility_explicit(
+    node: &SwiftNode<'_>,
+    default_vis: Visibility,
+) -> (Visibility, bool) {
     for child in node.children() {
         if child.kind() == "visibility_modifier"
             && let Some(vis) = parse_visibility_modifier(&child)
         {
-            return vis;
+            return (vis, true);
         }
         if child.kind() == "modifiers"
             && let Some(vis) = child
@@ -158,10 +161,14 @@ pub(super) fn extract_visibility(node: &SwiftNode<'_>, default_vis: Visibility) 
                 .filter(|m| m.kind() == "visibility_modifier")
                 .find_map(|m| parse_visibility_modifier(&m))
         {
-            return vis;
+            return (vis, true);
         }
     }
-    default_vis
+    (default_vis, false)
+}
+
+pub(super) fn extract_visibility(node: &SwiftNode<'_>, default_vis: Visibility) -> Visibility {
+    extract_visibility_explicit(node, default_vis).0
 }
 
 fn parse_visibility_modifier(node: &SwiftNode<'_>) -> Option<Visibility> {
@@ -469,6 +476,7 @@ pub(super) fn parse_import_declaration(
             )
     });
     let is_exported = has_attribute(node, "_exported");
+    let bypasses_visibility = has_attribute(node, "testable");
     let span = tree.node_span(node);
 
     if has_import_kind && segments.len() >= 2 {
@@ -480,7 +488,11 @@ pub(super) fn parse_import_declaration(
             exported_name: symbol.clone(),
             is_default: false,
             is_wildcard: false,
+            visibility: Visibility::Public,
         });
+        let origin = super::coupling::classify_import_origin(
+            segments.first().map_or("", String::as_str),
+        );
         return Some(ParsedImport {
             import: ImportDecl {
                 resolved_module: Some(resolved),
@@ -489,6 +501,8 @@ pub(super) fn parse_import_declaration(
                 symbol,
                 alias: None,
                 in_test_module: in_test_file,
+                bypasses_visibility,
+                origin,
                 span,
             },
             reexport,
@@ -502,7 +516,11 @@ pub(super) fn parse_import_declaration(
         exported_name: String::new(),
         is_default: false,
         is_wildcard: true,
+        visibility: Visibility::Public,
     });
+    let origin = super::coupling::classify_import_origin(
+        segments.first().map_or("", String::as_str),
+    );
     Some(ParsedImport {
         import: ImportDecl {
             resolved_module: Some(resolved),
@@ -511,6 +529,8 @@ pub(super) fn parse_import_declaration(
             symbol: String::from("*"),
             alias: None,
             in_test_module: in_test_file,
+            bypasses_visibility,
+            origin,
             span,
         },
         reexport,

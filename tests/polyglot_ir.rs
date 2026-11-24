@@ -1,7 +1,8 @@
 use rqcode::ast::codebase::Codebase;
 use rqcode::ast::item::{
-    ExportDecl, FunctionDecl, FunctionRole, ImportDecl, ImportKind, ParamAccess, ParamDecl,
-    TypeDecl, TypeKind, TypeRef, Visibility,
+    ConditionalGuard, ExportDecl, FunctionCouplingFacts, FunctionDecl, FunctionRole, ImportDecl,
+    ImportKind, ImportOrigin, ParamAccess, ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef,
+    Visibility,
 };
 use rqcode::ast::similarity::NormalizedTree;
 use rqcode::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
@@ -20,6 +21,9 @@ fn make_type(name: &str, file: &str, is_default_export: bool) -> TypeDecl {
         visibility: Visibility::Public,
         in_test_module: false,
         is_default_export,
+        has_implicit_field_readers: false,
+        subclass_policy: SubclassPolicy::Closed,
+        base_types: Vec::new(),
         fields: Vec::new(),
         annotations: Vec::new(),
         span: Span::new(file, 1, 1, 3, 2),
@@ -36,9 +40,13 @@ fn make_fn_with_param(
         name: name.to_string(),
         owner_type: owner_type.map(str::to_string),
         is_interface_impl: false,
+        interface_name: None,
         self_receiver: None,
         visibility: Visibility::Public,
+            explicit_visibility: false,
+        is_default_export: false,
         role: FunctionRole::Production,
+        conditional_guard: ConditionalGuard::None,
         params: vec![ParamDecl {
             name: "x".to_string(),
             type_name: Some(TypeRef::Named(param_ty.to_string())),
@@ -53,6 +61,7 @@ fn make_fn_with_param(
         field_inits: Vec::new(),
         referenced_idents: Vec::new(),
         scoped_ident_refs: Vec::new(),
+        coupling: FunctionCouplingFacts::default(),
         span: Span::new(file, 5, 1, 7, 2),
     }
 }
@@ -65,6 +74,8 @@ fn make_import(module: &ModulePath, kind: ImportKind, symbol: &str, line: usize)
         symbol: symbol.to_string(),
         alias: None,
         in_test_module: false,
+            bypasses_visibility: false,
+        origin: ImportOrigin::Project,
         span: Span::new("src/service.ts", line, 1, line, 40),
     }
 }
@@ -79,11 +90,16 @@ fn make_file(rel: &str, module: &[&str], sep: &'static str) -> (SyntaxTree, File
         language: spec.id(),
         member_separator: sep,
         role: FileRole::Module,
+            is_barrel: false,
+            module_decls: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
         types: Vec::new(),
+        interface_impls: Vec::new(),
         functions: Vec::new(),
         top_level_idents: Vec::new(),
+        test_hooks: Vec::new(),
+        module_mocks: Vec::new(),
         suppressions: Vec::new(),
     };
     (tree, ast)
@@ -112,6 +128,7 @@ fn resolves_default_namespace_and_barrel_reexports_and_formats_member_separator(
             exported_name: String::new(),
             is_default: false,
             is_wildcard: true,
+            visibility: Visibility::Public,
         },
         ExportDecl {
             source_module: Some(order_mod.clone()),
@@ -119,6 +136,7 @@ fn resolves_default_namespace_and_barrel_reexports_and_formats_member_separator(
             exported_name: "CustomerOrder".to_string(),
             is_default: false,
             is_wildcard: false,
+            visibility: Visibility::Public,
         },
         ExportDecl {
             source_module: Some(order_mod.clone()),
@@ -126,6 +144,7 @@ fn resolves_default_namespace_and_barrel_reexports_and_formats_member_separator(
             exported_name: "default".to_string(),
             is_default: true,
             is_wildcard: false,
+            visibility: Visibility::Public,
         },
     ];
 
@@ -205,6 +224,7 @@ fn cyclic_barrel_reexports_terminate_cleanly() {
         exported_name: String::new(),
         is_default: false,
         is_wildcard: true,
+        visibility: Visibility::Public,
     });
 
     let (t2, mut f2) = make_file("src/b.ts", &["src", "b"], ".");
@@ -214,6 +234,7 @@ fn cyclic_barrel_reexports_terminate_cleanly() {
         exported_name: String::new(),
         is_default: false,
         is_wildcard: true,
+        visibility: Visibility::Public,
     });
 
     let (t3, mut f3) = make_file("src/c.ts", &["src", "c"], ".");

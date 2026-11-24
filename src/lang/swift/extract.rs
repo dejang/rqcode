@@ -1,15 +1,25 @@
 use super::members::{MemberContext, SwiftTypeIndex, qualify_name, subscript_body_node};
-use super::{SwiftConventions, SwiftNode, expr, syntax};
+use super::{SwiftConventions, SwiftNode, coupling, expr, syntax};
 use crate::ast::item::{
-    ExportDecl, FieldDecl, FunctionDecl, ImportDecl, TypeDecl, TypeKind, Visibility,
+    ConditionalGuard, ExportDecl, FieldDecl, FunctionDecl, ImportDecl, InterfaceImpl,
+    SubclassPolicy, TypeDecl, TypeKind, Visibility,
 };
 use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
+
+#[derive(Clone, Copy)]
+struct TypeDeclCtx<'b> {
+    parent_path: Option<&'b str>,
+    default_vis: Visibility,
+    in_test_context: bool,
+    guard: ConditionalGuard,
+}
 
 #[derive(Default)]
 struct ExtractedItems {
     imports: Vec<ImportDecl>,
     exports: Vec<ExportDecl>,
     types: Vec<TypeDecl>,
+    interface_impls: Vec<InterfaceImpl>,
     functions: Vec<FunctionDecl>,
     top_level_idents: Vec<String>,
 }
@@ -62,9 +72,14 @@ impl<'a> SwiftExtractor<'a> {
             }
         }
 
+        let mut debug_guards = coupling::DebugGuardStack::default();
         for child in root.children() {
+            if debug_guards.update(&child) {
+                continue;
+            }
             if child.kind() != "import_declaration" {
-                self.walk_top_level(&child, in_test_file);
+                let guard = debug_guards.current(ConditionalGuard::None);
+                self.walk_top_level(&child, in_test_file, guard);
             }
         }
 
@@ -78,28 +93,41 @@ impl<'a> SwiftExtractor<'a> {
             language: self.tree.language_id(),
             member_separator: self.tree.language().member_separator(),
             role: self.file_role,
+            is_barrel: false,
+            module_decls: Vec::new(),
             imports: self.out.imports,
             exports: self.out.exports,
             types: self.out.types,
+            interface_impls: self.out.interface_impls,
             functions: self.out.functions,
             top_level_idents: self.out.top_level_idents,
+            test_hooks: Vec::new(),
+            module_mocks: Vec::new(),
             suppressions: self.tree.extract_suppressions(),
         }
     }
 
-    fn walk_top_level(&mut self, node: &SwiftNode<'a>, in_test_context: bool) {
+    fn walk_top_level(
+        &mut self,
+        node: &SwiftNode<'a>,
+        in_test_context: bool,
+        guard: ConditionalGuard,
+    ) {
+        let decl_ctx = TypeDeclCtx {
+            parent_path: None,
+            default_vis: Visibility::Internal,
+            in_test_context,
+            guard,
+        };
         match node.kind().as_ref() {
-            "class_declaration" => {
-                self.extract_class_like(node, None, Visibility::Internal, in_test_context);
-            }
-            "protocol_declaration" => {
-                self.extract_protocol(node, None, Visibility::Internal, in_test_context);
-            }
+            "class_declaration" => self.extract_class_like(node, decl_ctx),
+            "protocol_declaration" => self.extract_protocol(node, decl_ctx),
             "function_declaration" => {
-                if let Some(func) =
+                if let Some(mut func) =
                     self.index
                         .build_free_function(node, in_test_context, self.file_role)
                 {
+                    func.conditional_guard = guard;
                     self.out.functions.push(func);
                 }
             }
@@ -112,19 +140,13 @@ impl<'a> SwiftExtractor<'a> {
         }
     }
 
-    fn extract_class_like(
-        &mut self,
-        node: &SwiftNode<'a>,
-        parent_path: Option<&str>,
-        default_vis: Visibility,
-        in_test_context: bool,
-    ) {
+    fn extract_class_like(&mut self, node: &SwiftNode<'a>, ctx: TypeDeclCtx<'_>) {
         let Some(kind_node) = node.field("declaration_kind") else {
             return;
         };
         let kind = match kind_node.text().as_ref() {
             "extension" => {
-                self.extract_extension(node, in_test_context);
+                self.extract_extension(node, ctx.in_test_context, ctx.guard);
                 return;
             }
             "struct" => TypeKind::Struct,
@@ -132,27 +154,25 @@ impl<'a> SwiftExtractor<'a> {
             "enum" => TypeKind::Enum,
             _ => return,
         };
-        self.extract_nominal_type(node, parent_path, kind, default_vis, in_test_context);
+        self.extract_nominal_type(node, kind, ctx);
     }
 
     fn extract_nominal_type(
         &mut self,
         node: &SwiftNode<'a>,
-        parent_path: Option<&str>,
         kind: TypeKind,
-        default_vis: Visibility,
-        in_test_context: bool,
+        decl: TypeDeclCtx<'_>,
     ) {
         let Some(raw_name) = node.field("name").map(|n| n.text().into_owned()) else {
             return;
         };
-        let name = qualify_name(parent_path, &raw_name);
+        let name = qualify_name(decl.parent_path, &raw_name);
         let body = node.field("body");
         if let Some(allow_prefix) = self.index.classify_test_container(
             node,
             &name,
             kind == TypeKind::Class,
-            in_test_context,
+            decl.in_test_context,
         ) {
             if let Some(body_node) = body {
                 self.extract_test_container_members(&body_node, &name, allow_prefix);
@@ -162,7 +182,27 @@ impl<'a> SwiftExtractor<'a> {
 
         let mut annotations = Vec::new();
         syntax::collect_attributes(node, &mut annotations);
-        let visibility = syntax::extract_visibility(node, default_vis);
+        let has_implicit_field_readers = syntax::inherits_any(
+            node,
+            &[
+                String::from("Codable"),
+                String::from("Encodable"),
+                String::from("Decodable"),
+                String::from("Equatable"),
+                String::from("Hashable"),
+            ],
+        );
+        let (visibility, _) = syntax::extract_visibility_explicit(node, decl.default_vis);
+        if !decl.in_test_context
+            && annotations.iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "main" | "UIApplicationMain" | "NSApplicationMain"
+                )
+            })
+        {
+            self.file_role = FileRole::BinaryEntrypoint;
+        }
         let member_default_vis = if visibility == Visibility::Private {
             Visibility::Private
         } else {
@@ -173,28 +213,44 @@ impl<'a> SwiftExtractor<'a> {
             owner_kind: Some(kind),
             is_interface_impl: false,
             default_vis: member_default_vis,
-            in_test_context,
+            in_test_context: decl.in_test_context,
             has_main_attr: annotations.iter().any(|a| a == "main"),
         };
 
         let mut fields = Vec::new();
         if let Some(body_node) = body {
-            self.extract_body_members(&body_node, ctx, Some(&mut fields));
+            self.extract_body_members(&body_node, ctx, decl.guard, Some(&mut fields));
         }
 
+        let (base_types, custom_impls) =
+            coupling::extract_inheritance(node, &name, decl.in_test_context, false, self.tree);
+        self.out.interface_impls.extend(custom_impls);
+        let subclass_policy = if kind == TypeKind::Class {
+            coupling::extract_subclass_policy(node)
+        } else {
+            SubclassPolicy::Closed
+        };
         self.out.types.push(TypeDecl {
             name,
             kind,
             visibility,
-            in_test_module: in_test_context,
+            in_test_module: decl.in_test_context,
             is_default_export: false,
+            has_implicit_field_readers,
+            subclass_policy,
+            base_types,
             fields,
             annotations,
             span: self.tree.node_span(node),
         });
     }
 
-    fn extract_extension(&mut self, node: &SwiftNode<'a>, in_test_context: bool) {
+    fn extract_extension(
+        &mut self,
+        node: &SwiftNode<'a>,
+        in_test_context: bool,
+        guard: ConditionalGuard,
+    ) {
         let Some(owner_name) = syntax::extract_extension_target_name(node) else {
             return;
         };
@@ -207,6 +263,9 @@ impl<'a> SwiftExtractor<'a> {
             }
             return;
         }
+        let (_, ext_impls) =
+            coupling::extract_inheritance(node, &owner_name, in_test_context, true, self.tree);
+        self.out.interface_impls.extend(ext_impls);
         let ctx = MemberContext {
             owner_name: &owner_name,
             owner_kind: None,
@@ -216,7 +275,7 @@ impl<'a> SwiftExtractor<'a> {
             has_main_attr: false,
         };
         if let Some(body_node) = node.field("body") {
-            self.extract_body_members(&body_node, ctx, None);
+            self.extract_body_members(&body_node, ctx, guard, None);
         }
     }
 
@@ -224,49 +283,48 @@ impl<'a> SwiftExtractor<'a> {
         &mut self,
         body: &SwiftNode<'a>,
         ctx: MemberContext<'_>,
+        inherited_guard: ConditionalGuard,
         mut owner_fields: Option<&mut Vec<FieldDecl>>,
     ) {
+        let mut debug_guards = coupling::DebugGuardStack::default();
         for member in body.children() {
+            if debug_guards.update(&member) {
+                continue;
+            }
+            let guard = debug_guards.current(inherited_guard);
+            let nested_ctx = TypeDeclCtx {
+                parent_path: Some(ctx.owner_name),
+                default_vis: ctx.default_vis,
+                in_test_context: ctx.in_test_context,
+                guard,
+            };
             match member.kind().as_ref() {
                 "property_declaration" => {
-                    self.extract_member_property(&member, ctx, owner_fields.as_deref_mut());
+                    self.extract_member_property(&member, ctx, guard, owner_fields.as_deref_mut());
                 }
                 "function_declaration" => {
-                    if let Some(func) = self.index.build_method(&member, ctx) {
+                    if let Some(mut func) = self.index.build_method(&member, ctx) {
+                        func.conditional_guard = guard;
                         self.out.functions.push(func);
                     }
                 }
                 "init_declaration" => {
-                    self.out
-                        .functions
-                        .push(self.index.build_lifecycle_method(&member, ctx, true));
+                    let mut func = self.index.build_lifecycle_method(&member, ctx, true);
+                    func.conditional_guard = guard;
+                    self.out.functions.push(func);
                 }
                 "deinit_declaration" => {
-                    self.out
-                        .functions
-                        .push(self.index.build_lifecycle_method(&member, ctx, false));
+                    let mut func = self.index.build_lifecycle_method(&member, ctx, false);
+                    func.conditional_guard = guard;
+                    self.out.functions.push(func);
                 }
                 "subscript_declaration" => {
-                    self.out
-                        .functions
-                        .push(self.index.build_subscript(&member, ctx));
+                    let mut func = self.index.build_subscript(&member, ctx);
+                    func.conditional_guard = guard;
+                    self.out.functions.push(func);
                 }
-                "class_declaration" => {
-                    self.extract_class_like(
-                        &member,
-                        Some(ctx.owner_name),
-                        ctx.default_vis,
-                        ctx.in_test_context,
-                    );
-                }
-                "protocol_declaration" => {
-                    self.extract_protocol(
-                        &member,
-                        Some(ctx.owner_name),
-                        ctx.default_vis,
-                        ctx.in_test_context,
-                    );
-                }
+                "class_declaration" => self.extract_class_like(&member, nested_ctx),
+                "protocol_declaration" => self.extract_protocol(&member, nested_ctx),
                 _ => {}
             }
         }
@@ -276,10 +334,12 @@ impl<'a> SwiftExtractor<'a> {
         &mut self,
         node: &SwiftNode<'a>,
         ctx: MemberContext<'_>,
+        guard: ConditionalGuard,
         mut owner_fields: Option<&mut Vec<FieldDecl>>,
     ) {
         let is_static = syntax::is_static_or_class_member(node);
-        let visibility = syntax::extract_visibility(node, ctx.default_vis);
+        let (visibility, explicit_visibility) =
+            syntax::extract_visibility_explicit(node, ctx.default_vis);
 
         for binding in syntax::extract_property_bindings(node) {
             if let Some(computed) = &binding.computed_value {
@@ -287,20 +347,22 @@ impl<'a> SwiftExtractor<'a> {
                     if !ctx.in_test_context {
                         syntax::collect_leaf_idents(computed, &mut self.out.top_level_idents);
                     }
-                } else if let Some(func) = self
+                } else if let Some(mut func) = self
                     .index
                     .build_computed_property(node, &binding, ctx, visibility)
                 {
+                    func.conditional_guard = guard;
                     self.out.functions.push(func);
                 }
                 continue;
             }
 
             if binding.observer_block.is_some()
-                && let Some(func) = self
+                && let Some(mut func) = self
                     .index
                     .build_property_observer(node, &binding, ctx, visibility, is_static)
             {
+                func.conditional_guard = guard;
                 self.out.functions.push(func);
             }
 
@@ -320,7 +382,9 @@ impl<'a> SwiftExtractor<'a> {
                     name: field_name,
                     type_name: prop_type,
                     visibility,
+                    explicit_visibility,
                     is_mut_ref: false,
+                    conditional_guard: guard,
                     span: self.tree.node_span(&binding.pattern),
                 });
             }
@@ -334,6 +398,12 @@ impl<'a> SwiftExtractor<'a> {
         allow_xctest_prefix: bool,
     ) {
         let mut param_names = Vec::new();
+        let nested_ctx = TypeDeclCtx {
+            parent_path: Some(container_name),
+            default_vis: Visibility::Private,
+            in_test_context: true,
+            guard: ConditionalGuard::None,
+        };
         for member in body.children() {
             match member.kind().as_ref() {
                 "function_declaration" => {
@@ -398,36 +468,21 @@ impl<'a> SwiftExtractor<'a> {
                         }
                     }
                 }
-                "class_declaration" => {
-                    self.extract_class_like(
-                        &member,
-                        Some(container_name),
-                        Visibility::Private,
-                        true,
-                    );
-                }
-                "protocol_declaration" => {
-                    self.extract_protocol(&member, Some(container_name), Visibility::Private, true);
-                }
+                "class_declaration" => self.extract_class_like(&member, nested_ctx),
+                "protocol_declaration" => self.extract_protocol(&member, nested_ctx),
                 _ => {}
             }
         }
     }
 
-    fn extract_protocol(
-        &mut self,
-        node: &SwiftNode<'a>,
-        parent_path: Option<&str>,
-        default_vis: Visibility,
-        in_test_context: bool,
-    ) {
+    fn extract_protocol(&mut self, node: &SwiftNode<'a>, decl: TypeDeclCtx<'_>) {
         let Some(raw_name) = node.field("name").map(|n| n.text().into_owned()) else {
             return;
         };
-        let name = qualify_name(parent_path, &raw_name);
+        let name = qualify_name(decl.parent_path, &raw_name);
         let mut annotations = Vec::new();
         syntax::collect_attributes(node, &mut annotations);
-        let visibility = syntax::extract_visibility(node, default_vis);
+        let (visibility, _) = syntax::extract_visibility_explicit(node, decl.default_vis);
 
         let fields = node
             .field("body")
@@ -449,7 +504,9 @@ impl<'a> SwiftExtractor<'a> {
                             name: field_name,
                             type_name: prop_type,
                             visibility,
+                            explicit_visibility: false,
                             is_mut_ref: false,
+                            conditional_guard: ConditionalGuard::None,
                             span: self.tree.node_span(&m),
                         })
                     })
@@ -457,12 +514,17 @@ impl<'a> SwiftExtractor<'a> {
             })
             .unwrap_or_default();
 
+        let (base_types, _) =
+            coupling::extract_inheritance(node, &name, decl.in_test_context, false, self.tree);
         self.out.types.push(TypeDecl {
             name,
             kind: TypeKind::Interface,
             visibility,
-            in_test_module: in_test_context,
+            in_test_module: decl.in_test_context,
             is_default_export: false,
+            has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed,
+            base_types,
             fields,
             annotations,
             span: self.tree.node_span(node),

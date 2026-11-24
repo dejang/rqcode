@@ -146,6 +146,10 @@ pub(super) fn collect_decorators(node: &TsNode<'_>, out: &mut Vec<String>) {
     }
 }
 
+pub(super) fn has_explicit_visibility(node: &TsNode<'_>) -> bool {
+    node.children().any(|c| c.kind() == "accessibility_modifier")
+}
+
 pub(super) fn extract_visibility(node: &TsNode<'_>) -> Visibility {
     for child in node.children() {
         if child.kind() == "accessibility_modifier" {

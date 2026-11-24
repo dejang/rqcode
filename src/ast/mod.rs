@@ -5,7 +5,10 @@ pub mod similarity;
 
 pub use self::language::{CommentStyle, LanguageGrammar, LanguageId, LanguageSpec};
 
-use crate::ast::item::{ExportDecl, FunctionDecl, ImportDecl, Suppression, TypeDecl};
+use crate::ast::item::{
+    ExportDecl, FunctionDecl, ImportDecl, InterfaceImpl, ModuleDecl, ModuleMock, Suppression,
+    TestHookSite, TypeDecl,
+};
 use crate::diagnostic::Span;
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc};
@@ -289,11 +292,17 @@ pub struct FileAst {
     pub language: LanguageId,
     pub member_separator: &'static str,
     pub role: FileRole,
+    /// Whether this file acts as a directory/package barrel re-exporting its public surface.
+    pub is_barrel: bool,
+    pub module_decls: Vec<ModuleDecl>,
     pub imports: Vec<ImportDecl>,
     pub exports: Vec<ExportDecl>,
     pub types: Vec<TypeDecl>,
+    pub interface_impls: Vec<InterfaceImpl>,
     pub functions: Vec<FunctionDecl>,
     pub top_level_idents: Vec<String>,
+    pub test_hooks: Vec<TestHookSite>,
+    pub module_mocks: Vec<ModuleMock>,
     pub suppressions: Vec<Suppression>,
 }
 
@@ -313,6 +322,18 @@ impl FileAst {
 mod tests {
     use super::*;
     use crate::lang::rust::rust_language_spec;
+
+    #[test]
+    fn module_path_matches_hierarchy_and_qualified_suffixes() {
+        let root = ModulePath::new(vec!["crate".into(), "rules".into()]);
+        let child = root.push("test_coupling");
+        assert!(child.is_same_or_child_of(&root));
+        assert!(!root.is_same_or_child_of(&child));
+        assert!(child.matches_qualified_path("rules::test_coupling"));
+        assert!(!child.matches_qualified_path("other::test_coupling"));
+        assert!(!child.matches_qualified_path(""));
+        assert_eq!(child.to_string(), "crate::rules::test_coupling");
+    }
 
     #[test]
     fn syntax_tree_matches_rust_ast_grep_pattern() {

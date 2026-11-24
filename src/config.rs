@@ -213,12 +213,109 @@ pub enum PublicApiScope {
     All,
 }
 
+/// Toggle flags for test-only production code and private-member coupling checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestCouplingCoreFlags {
+    pub flag_test_only_production_api: bool,
+    pub flag_test_only_production_field: bool,
+    pub flag_private_test_coupling: bool,
+}
+
+impl Default for TestCouplingCoreFlags {
+    fn default() -> Self {
+        Self {
+            flag_test_only_production_api: true,
+            flag_test_only_production_field: true,
+            flag_private_test_coupling: true,
+        }
+    }
+}
+
+/// Toggle flags for public-surface boundary and test-driven overexposure checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestCouplingSurfaceFlags {
+    pub flag_test_bypasses_public_surface: bool,
+    pub flag_overexposed_for_tests: bool,
+}
+
+impl Default for TestCouplingSurfaceFlags {
+    fn default() -> Self {
+        Self {
+            flag_test_bypasses_public_surface: true,
+            flag_overexposed_for_tests: true,
+        }
+    }
+}
+
+/// Toggle flags for production test hooks, encapsulation escapes, and representation assertions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestCouplingHookFlags {
+    pub flag_production_test_hook: bool,
+    pub flag_test_encapsulation_escape: bool,
+    pub flag_test_asserts_internal_representation: bool,
+}
+
+impl Default for TestCouplingHookFlags {
+    fn default() -> Self {
+        Self {
+            flag_production_test_hook: true,
+            flag_test_encapsulation_escape: true,
+            flag_test_asserts_internal_representation: true,
+        }
+    }
+}
+
+/// Toggle flags for internal-collaborator mocking, SUT spying, and interaction-only tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestCouplingMockFlags {
+    pub flag_test_mocks_internal_collaborator: bool,
+    pub flag_test_spies_on_sut: bool,
+    pub flag_interaction_only_test: bool,
+}
+
+impl Default for TestCouplingMockFlags {
+    fn default() -> Self {
+        Self {
+            flag_test_mocks_internal_collaborator: true,
+            flag_test_spies_on_sut: true,
+            flag_interaction_only_test: true,
+        }
+    }
+}
+
+/// Toggle flags for mock-only abstraction checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestCouplingAbstractionFlags {
+    pub flag_mock_only_abstraction: bool,
+}
+
+impl Default for TestCouplingAbstractionFlags {
+    fn default() -> Self {
+        Self {
+            flag_mock_only_abstraction: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TestCouplingConfig {
     pub enabled: bool,
-    pub flag_test_only_production_api: bool,
-    pub flag_private_test_coupling: bool,
+    #[serde(flatten)]
+    pub core: TestCouplingCoreFlags,
+    #[serde(flatten)]
+    pub surface: TestCouplingSurfaceFlags,
+    #[serde(flatten)]
+    pub hooks: TestCouplingHookFlags,
+    #[serde(flatten)]
+    pub mocking: TestCouplingMockFlags,
+    #[serde(flatten)]
+    pub abstractions: TestCouplingAbstractionFlags,
     pub public_api_scope: PublicApiScope,
     pub severity: Severity,
 }
@@ -227,8 +324,11 @@ impl Default for TestCouplingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            flag_test_only_production_api: true,
-            flag_private_test_coupling: true,
+            core: TestCouplingCoreFlags::default(),
+            surface: TestCouplingSurfaceFlags::default(),
+            hooks: TestCouplingHookFlags::default(),
+            mocking: TestCouplingMockFlags::default(),
+            abstractions: TestCouplingAbstractionFlags::default(),
             public_api_scope: PublicApiScope::BinaryOnly,
             severity: Severity::Error,
         }
@@ -312,6 +412,8 @@ mod tests {
         assert_eq!(config.similarity.min_distinct_kinds, 4);
         assert!(config.cohesion.enabled);
         assert!(config.test_coupling.enabled);
+        assert!(config.test_coupling.core.flag_test_only_production_api);
+        assert!(config.test_coupling.core.flag_test_only_production_field);
         assert_eq!(
             config.test_coupling.public_api_scope,
             PublicApiScope::BinaryOnly
@@ -320,6 +422,19 @@ mod tests {
         assert!(config.ast_grep.builtin_rules);
         assert!(config.ast_grep.rules_dir.is_none());
         assert_eq!(config.ast_grep.disabled_rules, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_flattened_test_coupling_flags_from_toml() {
+        let toml = r"
+            [test_coupling]
+            flag_test_only_production_field = false
+        ";
+        let config = Config::from_toml(toml).expect("valid test_coupling config");
+        assert!(config.test_coupling.enabled);
+        assert!(config.test_coupling.core.flag_test_only_production_api);
+        assert!(!config.test_coupling.core.flag_test_only_production_field);
+        assert!(config.test_coupling.core.flag_private_test_coupling);
     }
 
     #[test]

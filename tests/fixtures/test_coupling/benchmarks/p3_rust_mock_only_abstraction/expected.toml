@@ -1,0 +1,9 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "mock-only-abstraction"
+file = "src/order.rs"
+line = 1
+message_contains = "TaxCalc"
+related_files = ["src/order.rs"]

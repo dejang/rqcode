@@ -25,6 +25,13 @@ file = "src/vault.rs"
 line = 38
 
 [[diagnostics]]
+rule = "test-accesses-private-field"
+file = "src/vault.rs"
+line = 40
+message_contains = "reads private field `balance`"
+related_files = ["src/vault.rs"]
+
+[[diagnostics]]
 rule = "test-calls-private-api"
 file = "src/vault.rs"
 message_contains = "Vault::fee"
@@ -33,5 +40,6 @@ related_files = ["src/vault.rs"]
 [[diagnostics]]
 rule = "test-accesses-private-field"
 file = "src/vault.rs"
+line = 49
 message_contains = "reads private field `balance`"
 related_files = ["src/vault.rs"]

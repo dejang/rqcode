@@ -49,12 +49,52 @@ impl ParamAccess {
     }
 }
 
+/// Conditional compilation guard applied to a declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConditionalGuard {
+    #[default]
+    None,
+    /// Declaration is gated behind a debug/non-release conditional compilation block.
+    DebugOnly,
+}
+
+/// Whether a nominal class type is explicitly designed for external subclassing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SubclassPolicy {
+    #[default]
+    Closed,
+    /// Explicitly extensible base class (e.g., abstract or open class).
+    Open,
+}
+
+/// Semantic role of an interface implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InterfaceImplRole {
+    #[default]
+    Normal,
+    /// Explicit custom debug/internal representation formatting implementation.
+    CustomDebugRepr,
+}
+
+/// Semantic origin of an import declaration for external-boundary classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ImportOrigin {
+    #[default]
+    Project,
+    /// Standard library value/collection types or test-framework utilities.
+    StandardValue,
+    /// Third-party package or I/O/system/network/filesystem boundary.
+    ExternalBoundary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDecl {
     pub name: String,
     pub type_name: Option<TypeRef>,
     pub visibility: Visibility,
+    pub explicit_visibility: bool,
     pub is_mut_ref: bool,
+    pub conditional_guard: ConditionalGuard,
     pub span: Span,
 }
 
@@ -65,6 +105,11 @@ pub struct TypeDecl {
     pub visibility: Visibility,
     pub in_test_module: bool,
     pub is_default_export: bool,
+    /// Whether generated/compiler-synthesized code (e.g., serialization or structural equality)
+    /// implicitly reads all fields of this type.
+    pub has_implicit_field_readers: bool,
+    pub subclass_policy: SubclassPolicy,
+    pub base_types: Vec<TypeRef>,
     pub fields: Vec<FieldDecl>,
     /// Type-level annotations, attributes, or decorators (e.g., derives, class decorators).
     pub annotations: Vec<String>,
@@ -91,6 +136,17 @@ impl TypeDecl {
     }
 }
 
+/// Records that `target_type` implements `interface_name` (e.g., trait impl, `implements`, protocol conformance).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceImpl {
+    pub interface_name: TypeRef,
+    pub target_type: TypeRef,
+    pub module_path: Option<ModulePath>,
+    pub in_test_module: bool,
+    pub role: InterfaceImplRole,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamDecl {
     pub name: String,
@@ -101,7 +157,10 @@ pub struct ParamDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldAccess {
     pub receiver_param: String,
+    pub receiver_is_self: bool,
+    pub receiver_type: Option<TypeRef>,
     pub field_name: String,
+    pub is_read: bool,
     pub is_write: bool,
     pub span: Span,
 }
@@ -131,6 +190,7 @@ pub struct CallSite {
     pub kind: CallKind,
     pub callee: String,
     pub receiver: Option<CallReceiver>,
+    pub arg_receivers: Vec<Option<CallReceiver>>,
     pub span: Span,
 }
 
@@ -149,6 +209,7 @@ impl CallSite {
 pub struct LocalBinding {
     pub name: String,
     pub type_name: Option<TypeRef>,
+    pub init_receiver: Option<CallReceiver>,
     pub init_callee: Option<String>,
 }
 
@@ -179,6 +240,17 @@ pub struct ImportDecl {
     pub symbol: String,
     pub alias: Option<String>,
     pub in_test_module: bool,
+    /// Whether this import explicitly bypasses normal module/package visibility (e.g., `@testable import`).
+    pub bypasses_visibility: bool,
+    pub origin: ImportOrigin,
+    pub span: Span,
+}
+
+/// Submodule declaration linking a parent module to a child module (e.g., `pub mod foo;` or `mod bar;`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleDecl {
+    pub name: String,
+    pub visibility: Visibility,
     pub span: Span,
 }
 
@@ -201,6 +273,7 @@ pub struct ExportDecl {
     pub is_default: bool,
     /// When `true` and `exported_name` is empty, re-exports all symbols flatly; when `exported_name` is non-empty, re-exports `source_module` as a namespace.
     pub is_wildcard: bool,
+    pub visibility: Visibility,
 }
 
 /// Semantic role of a function/method within a file.
@@ -217,14 +290,101 @@ pub enum FunctionRole {
     TestHelper,
 }
 
+/// Test-environment conditional hook inside production code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestHookSite {
+    pub label: String,
+    pub span: Span,
+}
+
+/// Runtime reflection or encapsulation-escape mechanism used by a test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncapsulationEscape {
+    pub mechanism: String,
+    pub target_receiver: Option<CallReceiver>,
+    pub span: Span,
+}
+
+/// Module-level mock replacing a dependency in a test file or test body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleMock {
+    pub resolved_module: Option<ModulePath>,
+    pub raw_specifier: String,
+    pub origin: ImportOrigin,
+    pub in_test_context: bool,
+    pub span: Span,
+}
+
+/// Spy installed on a receiver method inside a test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpySite {
+    pub target_receiver: Option<CallReceiver>,
+    pub method_name: String,
+    pub span: Span,
+}
+
+/// Breakdown of behavioral vs mock-interaction assertions inside a test function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AssertionSummary {
+    pub interaction_count: u32,
+    pub behavioral_count: u32,
+}
+
+impl AssertionSummary {
+    pub const fn record_interaction(&mut self) {
+        self.interaction_count += 1;
+    }
+
+    pub const fn record_behavioral(&mut self) {
+        self.behavioral_count += 1;
+    }
+}
+
+/// Exact-equality assertion on a value's debug/internal representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReprAssertion {
+    pub target_receiver: Option<CallReceiver>,
+    pub span: Span,
+}
+
+/// Cohesive test-coupling evidence extracted from a function body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FunctionCouplingFacts {
+    pub test_hooks: Vec<TestHookSite>,
+    pub encapsulation_escapes: Vec<EncapsulationEscape>,
+    pub module_mocks: Vec<ModuleMock>,
+    pub spy_sites: Vec<SpySite>,
+    pub assertions: AssertionSummary,
+    pub repr_assertions: Vec<ReprAssertion>,
+    pub has_ambient_io: bool,
+}
+
+impl FunctionCouplingFacts {
+    pub const fn record_interaction_assertion(&mut self) {
+        self.assertions.record_interaction();
+    }
+
+    pub const fn record_behavioral_assertion(&mut self) {
+        self.assertions.record_behavioral();
+    }
+
+    pub const fn mark_ambient_io(&mut self) {
+        self.has_ambient_io = true;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDecl {
     pub name: String,
     pub owner_type: Option<String>,
     pub is_interface_impl: bool,
+    pub interface_name: Option<TypeRef>,
     pub self_receiver: Option<ParamAccess>,
     pub visibility: Visibility,
+    pub explicit_visibility: bool,
+    pub is_default_export: bool,
     pub role: FunctionRole,
+    pub conditional_guard: ConditionalGuard,
     pub params: Vec<ParamDecl>,
     pub return_type: Option<TypeRef>,
     pub body_tree: NormalizedTree,
@@ -235,6 +395,7 @@ pub struct FunctionDecl {
     pub field_inits: Vec<FieldInit>,
     pub referenced_idents: Vec<String>,
     pub scoped_ident_refs: Vec<String>,
+    pub coupling: FunctionCouplingFacts,
     pub span: Span,
 }
 
@@ -358,19 +519,26 @@ mod tests {
             visibility: Visibility::Public,
             in_test_module: false,
             is_default_export: false,
+            has_implicit_field_readers: false,
+            subclass_policy: SubclassPolicy::Closed,
+            base_types: Vec::new(),
             fields: vec![
                 FieldDecl {
                     name: "total".to_string(),
                     type_name: Some(TypeRef::Named("u64".to_string())),
                     visibility: Visibility::Public,
+                    explicit_visibility: true,
                     is_mut_ref: false,
+                    conditional_guard: ConditionalGuard::None,
                     span: Span::new("src/order.rs", 2, 5, 2, 19),
                 },
                 FieldDecl {
                     name: "id".to_string(),
                     type_name: Some(TypeRef::Named("u64".to_string())),
                     visibility: Visibility::Private,
+                    explicit_visibility: false,
                     is_mut_ref: false,
+                    conditional_guard: ConditionalGuard::None,
                     span: Span::new("src/order.rs", 3, 5, 3, 12),
                 },
             ],
@@ -381,5 +549,15 @@ mod tests {
         assert!(ty.is_stateful_type());
         assert_eq!(ty.exposed_field_count(), 1);
         assert!(ty.has_annotation("Debug"));
+    }
+
+    #[test]
+    fn coupling_facts_track_interaction_and_behavioral_assertions() {
+        let mut facts = FunctionCouplingFacts::default();
+        facts.record_interaction_assertion();
+        facts.record_behavioral_assertion();
+        facts.record_interaction_assertion();
+        assert_eq!(facts.assertions.interaction_count, 2);
+        assert_eq!(facts.assertions.behavioral_count, 1);
     }
 }

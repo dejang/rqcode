@@ -1,0 +1,23 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-bypasses-public-surface"
+file = "Tests/PaymentKitTests/PaymentProcessorTests.swift"
+line = 7
+message_contains = "maxRetries"
+related_files = ["Sources/PaymentKit/PaymentProcessor.swift"]
+
+[[diagnostics]]
+rule = "test-bypasses-public-surface"
+file = "Tests/PaymentKitTests/PaymentProcessorTests.swift"
+line = 13
+message_contains = "PaymentProcessor.buildSigningPayload"
+related_files = ["Sources/PaymentKit/PaymentProcessor.swift"]
+
+[[diagnostics]]
+rule = "overexposed-for-tests"
+file = "Sources/PaymentKit/PaymentProcessor.swift"
+line = 16
+message_contains = "PaymentProcessor.buildSigningPayload"
+related_files = ["Tests/PaymentKitTests/PaymentProcessorTests.swift"]

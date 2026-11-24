@@ -210,29 +210,7 @@ impl<'a> SwiftTypeIndex<'a> {
         visibility: Visibility,
     ) -> Option<FunctionDecl> {
         let computed = binding.computed_value.clone()?;
-        let name = expr::extract_pattern_name(&binding.pattern)?;
-        let prop_type = binding
-            .type_annotation
-            .as_ref()
-            .and_then(|t| syntax::extract_type_ref(t, &self.conventions.transparent_type_wrappers));
-        let body = SwiftBodyWalker::new(
-            self.tree,
-            self.body_context(Some(ctx.owner_name), false, &[]),
-        )
-        .extract(Some(computed));
-        Some(body.into_function_decl(
-            FunctionHeader {
-                name,
-                owner_type: Some(ctx.owner_name.to_string()),
-                is_interface_impl: ctx.is_interface_impl,
-                self_receiver: Some(ParamAccess::SharedRef),
-                visibility,
-                role: member_role(ctx.in_test_context),
-                params: Vec::new(),
-                return_type: prop_type,
-            },
-            self.tree.node_span(node),
-        ))
+        self.build_property_accessor(node, binding, computed, ctx, (visibility, false, Some(ParamAccess::SharedRef)))
     }
 
     pub(super) fn build_property_observer(
@@ -244,6 +222,19 @@ impl<'a> SwiftTypeIndex<'a> {
         is_static: bool,
     ) -> Option<FunctionDecl> {
         let observer = binding.observer_block.clone()?;
+        let self_recv = (!is_static).then_some(ParamAccess::MutableRef);
+        self.build_property_accessor(node, binding, observer, ctx, (visibility, is_static, self_recv))
+    }
+
+    fn build_property_accessor(
+        &self,
+        node: &SwiftNode<'a>,
+        binding: &syntax::SwiftPropertyBinding<'a>,
+        body_node: SwiftNode<'a>,
+        ctx: MemberContext<'_>,
+        access: (Visibility, bool, Option<ParamAccess>),
+    ) -> Option<FunctionDecl> {
+        let (visibility, is_static, self_receiver) = access;
         let name = expr::extract_pattern_name(&binding.pattern)?;
         let prop_type = binding
             .type_annotation
@@ -253,14 +244,17 @@ impl<'a> SwiftTypeIndex<'a> {
             self.tree,
             self.body_context(Some(ctx.owner_name), is_static, &[]),
         )
-        .extract(Some(observer));
+        .extract(Some(body_node));
         Some(body.into_function_decl(
             FunctionHeader {
                 name,
                 owner_type: Some(ctx.owner_name.to_string()),
                 is_interface_impl: ctx.is_interface_impl,
-                self_receiver: (!is_static).then_some(ParamAccess::MutableRef),
+                interface_name: None,
+                self_receiver,
                 visibility,
+                explicit_visibility: syntax::extract_visibility_explicit(node, ctx.default_vis).1,
+                is_default_export: false,
                 role: member_role(ctx.in_test_context),
                 params: Vec::new(),
                 return_type: prop_type,
@@ -301,8 +295,11 @@ impl<'a> SwiftTypeIndex<'a> {
                 name: String::from("subscript"),
                 owner_type: Some(ctx.owner_name.to_string()),
                 is_interface_impl: ctx.is_interface_impl,
+                interface_name: None,
                 self_receiver,
                 visibility: syntax::extract_visibility(node, ctx.default_vis),
+                explicit_visibility: syntax::extract_visibility_explicit(node, ctx.default_vis).1,
+                is_default_export: false,
                 role: member_role(ctx.in_test_context),
                 params,
                 return_type,
@@ -351,8 +348,11 @@ impl<'a> SwiftTypeIndex<'a> {
                 name,
                 owner_type: Some(ctx.owner_name.to_string()),
                 is_interface_impl: ctx.is_interface_impl,
+                interface_name: None,
                 self_receiver,
                 visibility: syntax::extract_visibility(node, ctx.default_vis),
+                explicit_visibility: syntax::extract_visibility_explicit(node, ctx.default_vis).1,
+                is_default_export: false,
                 role,
                 params,
                 return_type,
@@ -396,8 +396,11 @@ impl<'a> SwiftTypeIndex<'a> {
                 name,
                 owner_type: Some(ctx.owner_name.to_string()),
                 is_interface_impl: ctx.is_interface_impl,
+                interface_name: None,
                 self_receiver,
                 visibility,
+                explicit_visibility: is_init && syntax::extract_visibility_explicit(node, ctx.default_vis).1,
+                is_default_export: false,
                 role: member_role(ctx.in_test_context),
                 params,
                 return_type,
@@ -443,8 +446,11 @@ impl<'a> SwiftTypeIndex<'a> {
                 name,
                 owner_type: None,
                 is_interface_impl: false,
+                interface_name: None,
                 self_receiver: None,
                 visibility: Visibility::Private,
+                explicit_visibility: false,
+                is_default_export: false,
                 role,
                 params,
                 return_type,
@@ -468,8 +474,11 @@ impl<'a> SwiftTypeIndex<'a> {
                 name,
                 owner_type: None,
                 is_interface_impl: false,
+                interface_name: None,
                 self_receiver: None,
                 visibility: Visibility::Private,
+                explicit_visibility: false,
+                is_default_export: false,
                 role: FunctionRole::TestHelper,
                 params,
                 return_type: None,
@@ -507,8 +516,11 @@ impl<'a> SwiftTypeIndex<'a> {
                 name,
                 owner_type: None,
                 is_interface_impl: false,
+                interface_name: None,
                 self_receiver: None,
                 visibility: syntax::extract_visibility(node, Visibility::Internal),
+                explicit_visibility: syntax::extract_visibility_explicit(node, Visibility::Internal).1,
+                is_default_export: false,
                 role,
                 params,
                 return_type,

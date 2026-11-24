@@ -1,0 +1,15 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "production-test-hook"
+file = "src/syncEngine.ts"
+line = 6
+message_contains = "NODE_ENV"
+
+[[diagnostics]]
+rule = "test-encapsulation-escape"
+file = "src/syncEngine.test.ts"
+line = 3
+message_contains = "CapturingSyncEngine"
+related_files = ["src/syncEngine.ts"]

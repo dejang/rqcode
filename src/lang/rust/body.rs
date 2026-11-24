@@ -3,8 +3,10 @@ use super::macro_tokens::{MacroTokenData, MacroTokenScanner};
 use super::normalize::RustNormalizeDialect;
 use super::syntax;
 use crate::ast::SyntaxTree;
-use crate::ast::item::{CallKind, CallReceiver, CallSite, FieldInit, LocalBinding, TypeRef};
-use crate::lang::common::{self, BodyAccumulator, BodyMetadataWalker, MemberFieldSpec};
+use crate::ast::item::{
+    CallKind, CallReceiver, CallSite, FieldAccess, FieldInit, LocalBinding, TypeRef,
+};
+use crate::lang::common::{self, AccessMode, BodyAccumulator, BodyMetadataWalker, MemberFieldSpec};
 
 pub(super) use crate::lang::common::ExtractedBody;
 
@@ -15,7 +17,7 @@ pub(super) struct BodyWalker<'a> {
 
 impl<'a> BodyMetadataWalker<'a> for BodyWalker<'a> {
     fn walk_body(&mut self, body: &TsNode<'a>) {
-        self.walk(body, false);
+        self.walk(body, AccessMode::Read);
     }
 
     fn into_accumulator(self) -> BodyAccumulator {
@@ -35,22 +37,32 @@ impl<'a> BodyWalker<'a> {
         common::extract_body_with_dialect(self, RustNormalizeDialect, body)
     }
 
-    fn walk(&mut self, node: &TsNode<'a>, in_write_target: bool) {
+    fn walk(&mut self, node: &TsNode<'a>, mode: AccessMode) {
         match node.kind().as_ref() {
             "line_comment" | "block_comment" => return,
             "assignment_expression" | "compound_assignment_expr" => {
+                let lhs_mode = if node.kind() == "compound_assignment_expr" {
+                    AccessMode::ReadWrite
+                } else {
+                    AccessMode::Write
+                };
                 if let Some(left) = node.field("left") {
-                    self.walk(&left, true);
+                    self.walk(&left, lhs_mode);
                 }
                 if let Some(right) = node.field("right") {
-                    self.walk(&right, false);
+                    self.walk(&right, AccessMode::Read);
                 }
                 return;
             }
             "reference_expression" => {
                 let is_mut_ref = node.children().any(|c| c.kind() == "mutable_specifier");
                 if let Some(val) = node.field("value") {
-                    self.walk(&val, in_write_target || is_mut_ref);
+                    let next = if is_mut_ref {
+                        AccessMode::ReadWrite
+                    } else {
+                        mode
+                    };
+                    self.walk(&val, next);
                 }
                 return;
             }
@@ -59,15 +71,20 @@ impl<'a> BodyWalker<'a> {
                     target_field: "value",
                     member_field: "field",
                     ident_kind: "identifier",
+                    self_kind: Some("self"),
                     is_transparent: |kind| kind == "parenthesized_expression",
                 };
+                let fallback_ty = node.field("value").and_then(|v| infer_expr_origin(&v).0);
                 if let Some((raw_value, recorded)) =
                     self.acc
-                        .record_ident_field_access(self.tree, node, spec, in_write_target)
+                        .record_ident_field_access(self.tree, node, spec, mode, fallback_ty)
                 {
-                    // Chained access (e.g. `order.customer.name = x`): attribute the write to
-                    // `order.customer` rather than attributing `Customer::name` to `order`.
-                    self.walk(&raw_value, in_write_target && !recorded);
+                    let next = if mode.is_write() && !recorded {
+                        AccessMode::ReadWrite
+                    } else {
+                        AccessMode::Read
+                    };
+                    self.walk(&raw_value, next);
                 }
                 return;
             }
@@ -78,17 +95,15 @@ impl<'a> BodyWalker<'a> {
                     if func_range == Some(child.range()) {
                         self.walk_call_callee(&child);
                     } else {
-                        self.walk(&child, false);
+                        self.walk(&child, AccessMode::Read);
                     }
                 }
                 return;
             }
-            "scoped_identifier" => {
-                if let Some(name) = node.field("name") {
-                    self.acc.push_scoped_ident_ref(name.text().into_owned());
-                }
-            }
+            "scoped_identifier" => self.record_scoped_ident(node),
             "struct_expression" => self.record_struct_init(node),
+            "struct_pattern" => self.record_struct_pattern(node),
+            "tuple_struct_pattern" => self.record_tuple_struct_pattern(node),
             "let_declaration" => self.record_local_binding(node),
             "macro_invocation" => self.record_macro_invocation(node),
             _ => {}
@@ -101,23 +116,58 @@ impl<'a> BodyWalker<'a> {
             return;
         }
 
-        let keep_write = in_write_target && node.kind() == "parenthesized_expression";
+        let next_mode = if node.kind() == "parenthesized_expression" {
+            mode
+        } else {
+            AccessMode::Read
+        };
         for child in node.children() {
-            self.walk(&child, keep_write);
+            self.walk(&child, next_mode);
+        }
+    }
+
+    fn record_scoped_ident(&mut self, node: &TsNode<'a>) {
+        if let Some(name) = node.field("name") {
+            self.acc.push_scoped_ident_ref(name.text().into_owned());
+        }
+        if let Some((prefix, sym)) = syntax::split_scoped_path(node)
+            && prefix.len() >= 2
+            && prefix[0] == "std"
+            && match prefix[1].as_str() {
+                "fs" | "process" | "env" => true,
+                "net" => !matches!(
+                    sym.as_str(),
+                    "IpAddr" | "Ipv4Addr" | "Ipv6Addr" | "SocketAddr" | "SocketAddrV4" | "SocketAddrV6"
+                ),
+                _ => false,
+            }
+        {
+            self.acc.coupling_mut().mark_ambient_io();
         }
     }
 
     fn record_macro_invocation(&mut self, node: &TsNode<'a>) {
-        self.acc.collect_scoped_idents(node, "identifier");
+        if let Some(hook) = super::macro_tokens::detect_cfg_test_hook(self.tree, node) {
+            self.acc.coupling_mut().test_hooks.push(hook);
+        }
+        self.acc.coupling_mut().repr_assertions.extend(
+            super::macro_tokens::detect_debug_repr_assertions(self.tree, node),
+        );
         if let Some(tt) = node.children().find(|c| c.kind() == "token_tree") {
             let MacroTokenData {
                 field_accesses,
                 calls,
                 constructed_types,
                 field_inits,
+                scoped_ident_refs,
             } = MacroTokenScanner::new(self.tree).scan_token_tree(&tt);
-            self.acc
-                .extend_macro_data(field_accesses, calls, constructed_types, field_inits);
+            self.acc.extend_macro_data(
+                field_accesses,
+                calls,
+                constructed_types,
+                field_inits,
+                scoped_ident_refs,
+            );
         }
     }
 
@@ -127,7 +177,7 @@ impl<'a> BodyWalker<'a> {
         match node.kind().as_ref() {
             "field_expression" => {
                 for child in node.children() {
-                    self.walk(&child, false);
+                    self.walk(&child, AccessMode::Read);
                 }
             }
             "generic_function" => {
@@ -136,11 +186,11 @@ impl<'a> BodyWalker<'a> {
                     if func_range == Some(child.range()) {
                         self.walk_call_callee(&child);
                     } else {
-                        self.walk(&child, false);
+                        self.walk(&child, AccessMode::Read);
                     }
                 }
             }
-            _ => self.walk(node, false),
+            _ => self.walk(node, AccessMode::Read),
         }
     }
 
@@ -186,6 +236,84 @@ impl<'a> BodyWalker<'a> {
         }
     }
 
+    fn record_struct_pattern(&mut self, node: &TsNode<'a>) {
+        let Some(ty_node) = node.field("type") else {
+            return;
+        };
+        let raw_ty = ty_node.text();
+        let ty_name = strip_turbofish(&raw_ty);
+        if ty_name.is_empty() {
+            return;
+        }
+        let ty_ref = syntax::rust_type_ref(ty_name);
+        for child in node.children() {
+            if child.kind() != "field_pattern"
+                || child
+                    .field("pattern")
+                    .is_some_and(|pat| pat.text().trim() == "_")
+            {
+                continue;
+            }
+            let field_name = child
+                .field("name")
+                .map(|n| n.text().into_owned())
+                .or_else(|| {
+                    child
+                        .children()
+                        .find(|c| c.kind() == "shorthand_field_identifier")
+                        .map(|n| n.text().into_owned())
+                });
+            if let Some(field_name) = field_name {
+                self.acc.push_field_access(FieldAccess {
+                    receiver_param: String::new(),
+                    receiver_is_self: false,
+                    receiver_type: Some(ty_ref.clone()),
+                    field_name,
+                    is_read: true,
+                    is_write: false,
+                    span: self.tree.node_span(&child),
+                });
+            }
+        }
+    }
+
+    fn record_tuple_struct_pattern(&mut self, node: &TsNode<'a>) {
+        let Some(ty_node) = node.field("type") else {
+            return;
+        };
+        let ty_range = ty_node.range();
+        let raw_ty = ty_node.text();
+        let ty_name = strip_turbofish(&raw_ty);
+        if ty_name.is_empty() {
+            return;
+        }
+        let ty_ref = syntax::rust_type_ref(ty_name);
+        let mut idx = 0usize;
+        for child in node.children() {
+            if child.kind() == "remaining_field_pattern" {
+                break;
+            }
+            if !child.is_named()
+                || child.range() == ty_range
+                || matches!(child.kind().as_ref(), "line_comment" | "block_comment")
+            {
+                continue;
+            }
+            if child.text().trim() != "_" {
+                self.acc.push_field_access(FieldAccess {
+                    receiver_param: String::new(),
+                    receiver_is_self: false,
+                    receiver_type: Some(ty_ref.clone()),
+                    field_name: idx.to_string(),
+                    is_read: true,
+                    is_write: false,
+                    span: self.tree.node_span(&child),
+                });
+            }
+            idx += 1;
+        }
+    }
+
     fn record_local_binding(&mut self, node: &TsNode<'a>) {
         let Some(pattern) = node.field("pattern") else {
             return;
@@ -201,17 +329,19 @@ impl<'a> BodyWalker<'a> {
             self.acc.push_local_binding(LocalBinding {
                 name,
                 type_name: annotated_type,
+                init_receiver: None,
                 init_callee: None,
             });
             return;
         }
 
         if let Some(val) = node.field("value") {
-            let (type_name, init_callee) = infer_expr_origin(&val);
+            let (type_name, init_receiver, init_callee) = infer_expr_origin(&val);
             if type_name.is_some() || init_callee.is_some() {
                 self.acc.push_local_binding(LocalBinding {
                     name,
                     type_name,
+                    init_receiver,
                     init_callee,
                 });
             }
@@ -231,6 +361,15 @@ impl<'a> BodyWalker<'a> {
             raw_func
         };
         let span = self.tree.node_span(call_node);
+        let arg_receivers: Vec<Option<CallReceiver>> = call_node
+            .field("arguments")
+            .map(|args| {
+                args.children()
+                    .filter(TsNode::is_named)
+                    .map(|arg| extract_expr_receiver(&arg))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         match func_node.kind().as_ref() {
             "identifier" => {
@@ -238,6 +377,7 @@ impl<'a> BodyWalker<'a> {
                     kind: CallKind::Free,
                     callee: func_node.text().into_owned(),
                     receiver: None,
+                    arg_receivers,
                     span,
                 });
             }
@@ -251,7 +391,7 @@ impl<'a> BodyWalker<'a> {
                         CallReceiver::SelfInstance
                     } else if v.kind() == "identifier" {
                         CallReceiver::Named(v.text().into_owned())
-                    } else if let (Some(ty), _) = infer_expr_origin(&v) {
+                    } else if let (Some(ty), _, _) = infer_expr_origin(&v) {
                         match ty {
                             TypeRef::SelfType => CallReceiver::SelfType,
                             TypeRef::Named(name) => CallReceiver::Named(name),
@@ -265,6 +405,7 @@ impl<'a> BodyWalker<'a> {
                         kind: CallKind::Method,
                         callee,
                         receiver,
+                        arg_receivers,
                         span,
                     });
                 }
@@ -276,6 +417,7 @@ impl<'a> BodyWalker<'a> {
                             kind: CallKind::SameModule,
                             callee,
                             receiver: None,
+                            arg_receivers,
                             span,
                         });
                         return;
@@ -299,6 +441,7 @@ impl<'a> BodyWalker<'a> {
                         kind: CallKind::Scoped,
                         callee,
                         receiver: syntax::rust_scoped_receiver(ty_path),
+                        arg_receivers,
                         span,
                     });
                 }
@@ -308,62 +451,94 @@ impl<'a> BodyWalker<'a> {
     }
 }
 
-fn infer_expr_origin(node: &TsNode<'_>) -> (Option<TypeRef>, Option<String>) {
+fn strip_turbofish(raw: &str) -> &str {
+    raw.split("::<").next().unwrap_or(raw).trim()
+}
+
+fn extract_expr_receiver(node: &TsNode<'_>) -> Option<CallReceiver> {
+    match node.kind().as_ref() {
+        "reference_expression" => node.field("value").and_then(|v| extract_expr_receiver(&v)),
+        "parenthesized_expression" | "try_expression" | "await_expression" => node
+            .children()
+            .find(TsNode::is_named)
+            .and_then(|c| extract_expr_receiver(&c)),
+        "self" => Some(CallReceiver::SelfInstance),
+        "identifier" => Some(CallReceiver::Named(node.text().into_owned())),
+        _ => match infer_expr_origin(node).0 {
+            Some(TypeRef::SelfType) => Some(CallReceiver::SelfType),
+            Some(TypeRef::Named(name)) => Some(CallReceiver::Named(name)),
+            None => None,
+        },
+    }
+}
+
+fn infer_expr_origin(node: &TsNode<'_>) -> (Option<TypeRef>, Option<CallReceiver>, Option<String>) {
     match node.kind().as_ref() {
         "reference_expression" => node
             .field("value")
-            .map_or((None, None), |v| infer_expr_origin(&v)),
+            .map_or((None, None, None), |v| infer_expr_origin(&v)),
         "try_expression" | "parenthesized_expression" | "await_expression" => node
             .children()
             .find(TsNode::is_named)
-            .map_or((None, None), |c| infer_expr_origin(&c)),
+            .map_or((None, None, None), |c| infer_expr_origin(&c)),
+        "identifier" => {
+            let text = node.text();
+            if text.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                (Some(syntax::rust_type_ref(text.into_owned())), None, None)
+            } else {
+                (None, None, None)
+            }
+        }
+        "scoped_identifier" => {
+            if let Some((prefix, name)) = syntax::split_scoped_path(node)
+                && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                let mut full = prefix;
+                full.push(name);
+                return (Some(syntax::rust_type_ref(full.join("::"))), None, None);
+            }
+            (None, None, None)
+        }
         "struct_expression" => {
-            let ty = node.field("name").map(|n| {
-                let raw = n.text();
-                let name = raw.split("::<").next().unwrap_or(raw.as_ref()).trim();
-                syntax::rust_type_ref(name)
-            });
-            (ty, None)
+            let ty = node
+                .field("name")
+                .map(|n| syntax::rust_type_ref(strip_turbofish(&n.text())));
+            (ty, None, None)
         }
         "call_expression" => {
             let Some(raw_func) = node.field("function") else {
-                return (None, None);
+                return (None, None, None);
             };
             let func_node = if raw_func.kind() == "generic_function" {
                 let Some(inner) = raw_func.field("function") else {
-                    return (None, None);
+                    return (None, None, None);
                 };
                 inner
             } else {
                 raw_func
             };
-
             match func_node.kind().as_ref() {
-                "identifier" => (None, Some(func_node.text().into_owned())),
+                "identifier" => (None, None, Some(func_node.text().into_owned())),
                 "field_expression" => {
                     let method = func_node
                         .field("field")
                         .map(|f| f.text().into_owned())
                         .unwrap_or_default();
-                    if matches!(
-                        method.as_str(),
-                        "unwrap"
-                            | "expect"
-                            | "clone"
-                            | "unwrap_or_default"
-                            | "as_ref"
-                            | "as_mut"
-                            | "borrow"
-                            | "borrow_mut"
-                    ) && let Some(recv) = func_node.field("value")
-                    {
-                        return infer_expr_origin(&recv);
+                    if let Some(recv) = func_node.field("value") {
+                        if syntax::is_transparent_chain_method(method.as_str()) {
+                            return infer_expr_origin(&recv);
+                        }
+                        if !method.is_empty()
+                            && let Some(call_recv) = extract_expr_receiver(&recv)
+                        {
+                            return (None, Some(call_recv), Some(method));
+                        }
                     }
-                    (None, None)
+                    (None, None, None)
                 }
                 "scoped_identifier" => {
                     let Some((prefix, callee)) = syntax::split_scoped_path(&func_node) else {
-                        return (None, None);
+                        return (None, None, None);
                     };
                     if let Some(owner) = prefix.last()
                         && owner.chars().next().is_some_and(|c| c.is_ascii_uppercase())
@@ -377,13 +552,13 @@ fn infer_expr_origin(node: &TsNode<'_>) -> (Option<TypeRef>, Option<String>) {
                         {
                             return infer_expr_origin(&first_arg);
                         }
-                        return (Some(syntax::rust_type_ref(prefix.join("::"))), None);
+                        return (Some(syntax::rust_type_ref(prefix.join("::"))), None, None);
                     }
-                    (None, Some(callee))
+                    (None, None, Some(callee))
                 }
-                _ => (None, None),
+                _ => (None, None, None),
             }
         }
-        _ => (None, None),
+        _ => (None, None, None),
     }
 }

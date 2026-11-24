@@ -1,0 +1,8 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-asserts-internal-representation"
+file = "src/planner.rs"
+line = 39
+message_contains = "QueryPlan"
