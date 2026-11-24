@@ -119,9 +119,21 @@ Core rules operate exclusively on the resolved language-agnostic `Codebase` grap
 #### 2. Test Coupling (`test-coupling`)
 | Diagnostic ID | What it catches |
 | ------------- | --------------- |
-| `test-only-production-api` | Production functions/methods that are only referenced by tests (configurable via `public_api_scope`) |
+| `test-only-production-api` | Production functions/methods unreachable from production roots and referenced only by tests (configurable via `public_api_scope`) |
+| `test-only-production-field` | Production fields written in production but read only by tests |
 | `test-calls-private-api` | Tests directly invoking private functions or private methods instead of testing through the public surface |
 | `test-accesses-private-field` | Tests directly reading, mutating, or initializing private fields |
+| `test-bypasses-public-surface` | Tests importing, calling, or accessing internal symbols past a package's public surface (`lib.rs`, barrel `index.ts`, Swift `@testable`) |
+| `overexposed-for-tests` | Internal APIs widened explicitly solely for cross-module test callers |
+| `production-test-hook` | Production conditionals or hooks guarded for test/debug environments (`#[cfg(test)]`, `NODE_ENV === "test"`, `#if DEBUG`) |
+| `test-encapsulation-escape` | Tests using runtime reflection (`Mirror`, `Reflect.get`), `as any`/bracket escapes, or subclassing closed concrete production classes |
+| `test-mocks-internal-collaborator` | Tests mocking internal project modules (exempting external I/O boundaries and re-export barrels wrapping them) |
+| `test-spies-on-sut` | Tests spying on private or `this`/`self`-reachable internal methods of the system under test |
+| `interaction-only-test` | Tests relying on internal mocks or SUT spies that assert only call interactions with zero behavioral assertions |
+| `mock-only-abstraction` | Internal interfaces/traits/protocols with at most one production implementation created solely for test doubles |
+| `test-asserts-internal-representation` | Exact-equality assertions on derived debug representations that expose private fields |
+
+See [docs/test_coupling.md](docs/test_coupling.md) for the rule taxonomy, three-phase analysis pipeline, per-language mappings, false-positive boundaries, and design rationale.
 
 #### 3. Structural Similarity (`similarity`)
 | Diagnostic ID | What it catches |
@@ -177,7 +189,17 @@ flag_stateless_impl_methods = true
 [test_coupling]
 enabled = true
 flag_test_only_production_api = true
+flag_test_only_production_field = true
 flag_private_test_coupling = true
+flag_test_bypasses_public_surface = true
+flag_overexposed_for_tests = true
+flag_production_test_hook = true
+flag_test_encapsulation_escape = true
+flag_test_mocks_internal_collaborator = true
+flag_test_spies_on_sut = true
+flag_interaction_only_test = true
+flag_mock_only_abstraction = true
+flag_test_asserts_internal_representation = true
 public_api_scope = "binary-only" # "binary-only" | "all"
 severity = "error"
 
