@@ -2,6 +2,7 @@ mod body;
 mod coupling;
 mod extract;
 mod imports;
+mod members;
 mod normalize;
 mod syntax;
 
@@ -235,7 +236,7 @@ class LocalHelper {}
         assert_eq!(order.name, "Order");
         assert_eq!(order.kind, TypeKind::Class);
         assert_eq!(order.visibility, Visibility::Public);
-        assert!(order.is_default_export);
+        assert!(order.export_binding.is_default());
 
         let field_summary: Vec<(&str, Visibility)> = order
             .fields

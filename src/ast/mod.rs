@@ -283,6 +283,18 @@ impl SyntaxTree {
     }
 }
 
+/// Classification of whether a source file acts as a barrel module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BarrelKind {
+    /// Regular module (not a barrel).
+    #[default]
+    None,
+    /// Re-exporting directory index file.
+    DirectoryIndex,
+    /// Non-index file containing exclusively imports and re-exports.
+    PureReexport,
+}
+
 /// Language-agnostic semantic representation of a single parsed source file.
 #[derive(Debug, Clone)]
 pub struct FileAst {
@@ -292,8 +304,8 @@ pub struct FileAst {
     pub language: LanguageId,
     pub member_separator: &'static str,
     pub role: FileRole,
-    /// Whether this file acts as a directory/package barrel re-exporting its public surface.
-    pub is_barrel: bool,
+    /// Classification of whether this file acts as a barrel module.
+    pub barrel_kind: BarrelKind,
     pub module_decls: Vec<ModuleDecl>,
     pub imports: Vec<ImportDecl>,
     pub exports: Vec<ExportDecl>,
@@ -315,6 +327,16 @@ impl FileAst {
     #[must_use]
     pub const fn is_test_file(&self) -> bool {
         self.role.is_test_file()
+    }
+
+    #[must_use]
+    pub const fn is_barrel(&self) -> bool {
+        !matches!(self.barrel_kind, BarrelKind::None)
+    }
+
+    #[must_use]
+    pub const fn is_directory_barrel(&self) -> bool {
+        matches!(self.barrel_kind, BarrelKind::DirectoryIndex)
     }
 }
 

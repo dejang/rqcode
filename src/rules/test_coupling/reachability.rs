@@ -183,7 +183,7 @@ impl<'a> ReachabilityChecker<'a> {
     }
 
     fn is_prod_root(&self, func: &IndexedFunc) -> bool {
-        if func.decl.is_entrypoint() {
+        if func.decl.role.is_entrypoint() {
             return true;
         }
         if func.decl.is_interface_impl && func.resolved_interface.is_none() {
@@ -431,7 +431,7 @@ impl<'a> ReachabilityChecker<'a> {
             if !enabled
                 || self.index.is_test_func(func)
                 || func.decl.is_interface_impl
-                || func.decl.is_entrypoint()
+                || func.decl.role.is_entrypoint()
                 || (!is_debug
                     && !self.check_public
                     && surface.effective_func_visibility(func, codebase.types())

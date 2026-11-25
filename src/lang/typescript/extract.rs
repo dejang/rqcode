@@ -2,22 +2,16 @@ use super::TsNode;
 use super::body::TsBodyWalker;
 use super::coupling;
 use super::imports::{self, ExportClauseResult, ImportBatch, ModuleImportParser};
+use super::members::{DeclMeta, ExtractedClass, TsMemberExtractor};
 use super::syntax::{self, TestRunnerKind};
 use crate::ast::item::{
-    ConditionalGuard, ExportDecl, FieldDecl, FunctionDecl, FunctionRole, ImportDecl, InterfaceImpl,
-    ModuleMock, ParamAccess, ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
+    ExportBinding, ExportDecl, ExportOrigin, FunctionDecl, FunctionRole, ImportDecl, InterfaceImpl, ModuleMock,
+    TypeDecl, Visibility,
 };
 use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
 use crate::lang::common::FunctionHeader;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Component;
-
-#[derive(Clone, Copy)]
-struct DeclMeta {
-    visibility: Visibility,
-    is_default_export: bool,
-    in_test_context: bool,
-}
 
 pub(super) struct TypeScriptExtractor<'a> {
     tree: &'a SyntaxTree,
@@ -44,10 +38,17 @@ impl<'a> TypeScriptExtractor<'a> {
                 .collect()
         });
         Self {
-            tree, module_path, base_dir, namespace_imports: HashMap::new(),
-            imports: Vec::new(), exports: Vec::new(), types: Vec::new(),
-            interface_impls: Vec::new(), functions: Vec::new(),
-            top_level_idents: Vec::new(), module_mocks: Vec::new(),
+            tree,
+            module_path,
+            base_dir,
+            namespace_imports: HashMap::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            types: Vec::new(),
+            interface_impls: Vec::new(),
+            functions: Vec::new(),
+            top_level_idents: Vec::new(),
+            module_mocks: Vec::new(),
         }
     }
 
@@ -74,11 +75,28 @@ impl<'a> TypeScriptExtractor<'a> {
             }
         }
 
+        let imported_locals: HashSet<&str> = self
+            .imports
+            .iter()
+            .filter(|imp| !imp.in_test_module)
+            .map(ImportDecl::local_name)
+            .collect();
+        for exp in &mut self.exports {
+            if exp.origin == ExportOrigin::Local && imported_locals.contains(exp.symbol.as_str()) {
+                exp.origin = ExportOrigin::ImportedBinding;
+            }
+        }
+
         self.top_level_idents.sort_unstable();
         self.top_level_idents.dedup();
 
-        let is_barrel =
-            imports::is_index_barrel(self.tree.relative_path(), &self.imports, &self.exports);
+        let barrel_kind = imports::classify_barrel_kind(
+            self.tree,
+            &self.imports,
+            &self.exports,
+            "index",
+            ".d.ts",
+        );
         FileAst {
             path: self.tree.path().to_path_buf(),
             relative_path: self.tree.relative_path().to_path_buf(),
@@ -86,7 +104,7 @@ impl<'a> TypeScriptExtractor<'a> {
             language: self.tree.language_id(),
             member_separator: self.tree.language().member_separator(),
             role,
-            is_barrel,
+            barrel_kind,
             module_decls: Vec::new(),
             imports: self.imports,
             exports: self.exports,
@@ -98,6 +116,10 @@ impl<'a> TypeScriptExtractor<'a> {
             module_mocks: self.module_mocks,
             suppressions: self.tree.extract_suppressions(),
         }
+    }
+
+    fn member_extractor(&self) -> TsMemberExtractor<'a, '_> {
+        TsMemberExtractor::new(self.tree, &self.base_dir, &self.namespace_imports)
     }
 
     fn walk_statement(&mut self, node: &TsNode<'a>, in_test_context: bool) {
@@ -121,10 +143,29 @@ impl<'a> TypeScriptExtractor<'a> {
     ) {
         match node.kind().as_ref() {
             "class_declaration" | "abstract_class_declaration" | "class" => {
-                self.extract_class(node, meta, outer_annotations);
+                if let Some(ExtractedClass {
+                    decl,
+                    methods,
+                    interface_impls,
+                }) = self
+                    .member_extractor()
+                    .extract_class(node, meta, outer_annotations)
+                {
+                    self.types.push(decl);
+                    self.functions.extend(methods);
+                    self.interface_impls.extend(interface_impls);
+                }
             }
-            "interface_declaration" => self.extract_interface(node, meta),
-            "enum_declaration" => self.extract_enum(node, meta),
+            "interface_declaration" => {
+                if let Some(decl) = self.member_extractor().extract_interface(node, meta) {
+                    self.types.push(decl);
+                }
+            }
+            "enum_declaration" => {
+                if let Some(decl) = self.member_extractor().extract_enum(node, meta) {
+                    self.types.push(decl);
+                }
+            }
             "function_declaration" => {
                 if let Some(name) = node.field("name").map(|n| n.text().into_owned()) {
                     self.extract_function_like(node, name, meta);
@@ -165,12 +206,19 @@ impl<'a> TypeScriptExtractor<'a> {
         }
 
         if let Some(val) = node.field("value") {
-            self.extract_exported_value(&val, is_default, in_test_context, &outer_annotations);
+            self.extract_exported_value(
+                node,
+                &val,
+                is_default,
+                in_test_context,
+                &outer_annotations,
+            );
         }
     }
 
     fn extract_exported_value(
         &mut self,
+        export_node: &TsNode<'a>,
         val: &TsNode<'a>,
         is_default: bool,
         in_test_context: bool,
@@ -183,7 +231,18 @@ impl<'a> TypeScriptExtractor<'a> {
         };
         match val.kind().as_ref() {
             "class" | "class_declaration" | "abstract_class_declaration" => {
-                self.extract_class(val, meta, outer_annotations);
+                if let Some(ExtractedClass {
+                    decl,
+                    methods,
+                    interface_impls,
+                }) = self
+                    .member_extractor()
+                    .extract_class(val, meta, outer_annotations)
+                {
+                    self.types.push(decl);
+                    self.functions.extend(methods);
+                    self.interface_impls.extend(interface_impls);
+                }
             }
             "function_declaration" | "function_expression" => {
                 let name = val
@@ -202,6 +261,8 @@ impl<'a> TypeScriptExtractor<'a> {
                         is_default: true,
                         is_wildcard: false,
                         visibility: Visibility::Public,
+                        origin: ExportOrigin::Local,
+                        span: self.tree.node_span(export_node),
                     });
                 }
                 self.mark_local_exported(&sym, is_default);
@@ -219,7 +280,7 @@ impl<'a> TypeScriptExtractor<'a> {
             if ty.name == symbol {
                 ty.visibility = Visibility::Public;
                 if is_default {
-                    ty.is_default_export = true;
+                    ty.export_binding = ExportBinding::Default;
                 }
             }
         }
@@ -227,178 +288,10 @@ impl<'a> TypeScriptExtractor<'a> {
             if func.owner_type.is_none() && func.name == symbol {
                 func.visibility = Visibility::Public;
                 if is_default {
-                    func.is_default_export = true;
+                    func.export_binding = ExportBinding::Default;
                 }
             }
         }
-    }
-
-    fn extract_class(&mut self, node: &TsNode<'a>, meta: DeclMeta, outer_annotations: &[String]) {
-        let Some(name) = node.field("name").map(|n| n.text().into_owned()) else {
-            return;
-        };
-        let mut fields = Vec::new();
-        let mut annotations = outer_annotations.to_vec();
-        syntax::collect_decorators(node, &mut annotations);
-
-        if let Some(body) = node.field("body") {
-            for child in body.children() {
-                match child.kind().as_ref() {
-                    "public_field_definition" | "field_definition" => {
-                        if let Some(field_name) = child.field("name").map(|n| n.text().into_owned())
-                        {
-                            fields.push(FieldDecl {
-                                name: field_name,
-                                type_name: child
-                                    .field("type")
-                                    .and_then(|t| syntax::extract_type_ref(&t)),
-                                visibility: syntax::extract_visibility(&child),
-                                explicit_visibility: syntax::has_explicit_visibility(&child),
-                                is_mut_ref: false,
-                                conditional_guard: ConditionalGuard::None,
-                                span: self.tree.node_span(&child),
-                            });
-                        }
-                    }
-                    "method_definition" => {
-                        if let Some(method) =
-                            self.extract_method(&child, &name, meta.in_test_context, &mut fields)
-                        {
-                            self.functions.push(method);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let (base_types, impls) =
-            coupling::extract_class_heritage(node, &name, meta.in_test_context, self.tree);
-        self.interface_impls.extend(impls);
-        let subclass_policy = if node.kind() == "abstract_class_declaration" {
-            SubclassPolicy::Open
-        } else {
-            SubclassPolicy::Closed
-        };
-        self.types.push(TypeDecl {
-            name,
-            kind: TypeKind::Class,
-            visibility: meta.visibility,
-            in_test_module: meta.in_test_context,
-            is_default_export: meta.is_default_export,
-            has_implicit_field_readers: false,
-            subclass_policy,
-            base_types,
-            fields,
-            annotations,
-            span: self.tree.node_span(node),
-        });
-    }
-
-    fn extract_method(
-        &self,
-        node: &TsNode<'a>,
-        owner_name: &str,
-        in_test_context: bool,
-        owner_fields: &mut Vec<FieldDecl>,
-    ) -> Option<FunctionDecl> {
-        let name = node.field("name")?.text().into_owned();
-        let is_ctor = name == "constructor";
-        let is_static = syntax::has_modifier_token(node, "static");
-        let self_receiver = (!is_ctor && !is_static).then_some(ParamAccess::MutableRef);
-        let return_type = if is_ctor {
-            Some(TypeRef::SelfType)
-        } else {
-            node.field("return_type")
-                .and_then(|t| syntax::extract_type_ref(&t))
-        };
-        let params = node
-            .field("parameters")
-            .map_or_else(Vec::new, |param_list| {
-                self.extract_param_list(&param_list, is_ctor.then_some(owner_fields))
-            });
-        let role = if in_test_context {
-            FunctionRole::TestHelper
-        } else {
-            FunctionRole::Production
-        };
-        let body = TsBodyWalker::new(self.tree, &self.base_dir, &self.namespace_imports)
-            .extract(node.field("body"));
-
-        Some(body.into_function_decl(
-            FunctionHeader {
-                name,
-                owner_type: Some(owner_name.to_string()),
-                is_interface_impl: false,
-                interface_name: None,
-                self_receiver,
-                visibility: syntax::extract_visibility(node),
-                explicit_visibility: syntax::has_explicit_visibility(node),
-                is_default_export: false,
-                role,
-                params,
-                return_type,
-            },
-            self.tree.node_span(node),
-        ))
-    }
-
-    fn extract_interface(&mut self, node: &TsNode<'a>, meta: DeclMeta) {
-        let Some(name) = node.field("name").map(|n| n.text().into_owned()) else {
-            return;
-        };
-        let mut fields = Vec::new();
-        if let Some(body) = node.field("body") {
-            for child in body.children() {
-                if child.kind() == "property_signature"
-                    && let Some(prop_name) = child.field("name").map(|n| n.text().into_owned())
-                {
-                    fields.push(FieldDecl {
-                        name: prop_name,
-                        type_name: child
-                            .field("type")
-                            .and_then(|t| syntax::extract_type_ref(&t)),
-                        visibility: Visibility::Public,
-                        explicit_visibility: false,
-                        is_mut_ref: false,
-                        conditional_guard: ConditionalGuard::None,
-                        span: self.tree.node_span(&child),
-                    });
-                }
-            }
-        }
-        self.types.push(TypeDecl {
-            name,
-            kind: TypeKind::Interface,
-            visibility: meta.visibility,
-            in_test_module: meta.in_test_context,
-            is_default_export: meta.is_default_export,
-            has_implicit_field_readers: false,
-            subclass_policy: SubclassPolicy::Closed,
-            base_types: Vec::new(),
-            fields,
-            annotations: Vec::new(),
-            span: self.tree.node_span(node),
-        });
-    }
-
-    fn extract_enum(&mut self, node: &TsNode<'a>, meta: DeclMeta) {
-        let Some(name) = node.field("name").map(|n| n.text().into_owned()) else {
-            return;
-        };
-        self.types.push(TypeDecl {
-            name,
-            kind: TypeKind::Enum,
-            visibility: meta.visibility,
-            in_test_module: meta.in_test_context,
-            is_default_export: meta.is_default_export,
-            has_implicit_field_readers: false,
-            subclass_policy: SubclassPolicy::Closed,
-            base_types: Vec::new(),
-            fields: Vec::new(),
-            annotations: Vec::new(),
-            span: self.tree.node_span(node),
-        });
     }
 
     fn extract_variable_declaration(&mut self, node: &TsNode<'a>, meta: DeclMeta) {
@@ -423,7 +316,7 @@ impl<'a> TypeScriptExtractor<'a> {
     }
 
     fn extract_function_like(&mut self, node: &TsNode<'a>, name: String, meta: DeclMeta) {
-        let params = self.extract_callable_params(node);
+        let params = self.member_extractor().extract_callable_params(node);
         let return_type = node
             .field("return_type")
             .and_then(|t| syntax::extract_type_ref(&t));
@@ -446,70 +339,14 @@ impl<'a> TypeScriptExtractor<'a> {
                 self_receiver: None,
                 visibility: meta.visibility,
                 explicit_visibility: meta.visibility == Visibility::Public,
-                is_default_export: meta.is_default_export,
+                export_binding: ExportBinding::from_is_default(meta.is_default_export),
+                is_lifecycle: false,
                 role,
                 params,
                 return_type,
             },
             self.tree.node_span(node),
         ));
-    }
-
-    fn extract_callable_params(&self, node: &TsNode<'a>) -> Vec<ParamDecl> {
-        if let Some(param_list) = node.field("parameters") {
-            return self.extract_param_list(&param_list, None);
-        }
-        if let Some(single) = node.field("parameter")
-            && single.kind() == "identifier"
-        {
-            return vec![ParamDecl {
-                name: single.text().into_owned(),
-                type_name: None,
-                access: ParamAccess::Owned,
-            }];
-        }
-        Vec::new()
-    }
-
-    fn extract_param_list(
-        &self,
-        param_list: &TsNode<'a>,
-        mut ctor_fields: Option<&mut Vec<FieldDecl>>,
-    ) -> Vec<ParamDecl> {
-        let mut params = Vec::new();
-        for child in param_list.children() {
-            if !matches!(
-                child.kind().as_ref(),
-                "required_parameter" | "optional_parameter"
-            ) {
-                continue;
-            }
-            let Some(param_name) = syntax::extract_param_name(&child) else {
-                continue;
-            };
-            let type_name = child
-                .field("type")
-                .and_then(|t| syntax::extract_type_ref(&t));
-            if let Some(fields) = ctor_fields.as_deref_mut()
-                && syntax::is_parameter_property(&child)
-            {
-                fields.push(FieldDecl {
-                    name: param_name.clone(),
-                    type_name: type_name.clone(),
-                    visibility: syntax::extract_visibility(&child),
-                    explicit_visibility: syntax::has_explicit_visibility(&child),
-                    is_mut_ref: false,
-                    conditional_guard: ConditionalGuard::None,
-                    span: self.tree.node_span(&child),
-                });
-            }
-            params.push(ParamDecl {
-                name: param_name,
-                type_name,
-                access: ParamAccess::Owned,
-            });
-        }
-        params
     }
 
     fn extract_expression_statement(&mut self, node: &TsNode<'a>, in_test_context: bool) {
@@ -569,7 +406,7 @@ impl<'a> TypeScriptExtractor<'a> {
             }
             TestRunnerKind::Case => {
                 let name = title.unwrap_or_else(|| String::from("anonymous_test"));
-                let params = self.extract_callable_params(&cb);
+                let params = self.member_extractor().extract_callable_params(&cb);
                 let body = TsBodyWalker::new(self.tree, &self.base_dir, &self.namespace_imports)
                     .extract(cb.field("body"));
                 self.functions.push(body.into_function_decl(
@@ -581,7 +418,8 @@ impl<'a> TypeScriptExtractor<'a> {
                         self_receiver: None,
                         visibility: Visibility::Private,
                         explicit_visibility: false,
-                        is_default_export: false,
+                        export_binding: ExportBinding::Standard,
+                        is_lifecycle: false,
                         role: FunctionRole::Test,
                         params,
                         return_type: None,

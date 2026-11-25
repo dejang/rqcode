@@ -4,7 +4,8 @@ use crate::ast::codebase::{
     EffectiveVisibility, FileId, FuncId, IndexedFunc, IndexedType, ResolvedInterfaceImpl, TypeId,
 };
 use crate::ast::item::{
-    CallKind, CallReceiver, ImportOrigin, ModuleMock, SpySite, TypeKind, Visibility,
+    CallKind, CallReceiver, ExportOrigin, ImportDecl, ImportOrigin, ModuleMock, SpySite, TypeKind,
+    Visibility,
 };
 use crate::config::{PublicApiScope, TestCouplingConfig};
 use crate::diagnostic::{Diagnostic, Span};
@@ -78,22 +79,29 @@ impl<'a> MockingChecker<'a> {
                 external_prod_modules.insert(&codebase.file(func.file_id).module_path);
             }
         }
+        let imported_targets: Vec<HashMap<&str, &ModulePath>> = codebase.files().iter().map(|f| {
+            f.imports.iter().filter(|i| !i.in_test_module)
+                .filter_map(|i| i.resolved_module.as_ref().map(|m| (ImportDecl::local_name(i), m)))
+                .collect()
+        }).collect();
         let mut changed = true;
         while changed {
             changed = false;
             for (file_idx, file) in codebase.files().iter().enumerate() {
                 let file_id = FileId(file_idx);
-                if file.is_test_file()
-                    || external_boundary_files.contains(&file_id)
-                    || !(file.is_barrel || (file.types.is_empty() && file.functions.is_empty()))
+                if file.is_test_file() || external_boundary_files.contains(&file_id)
+                    || !(file.is_barrel() || (file.types.is_empty() && file.functions.is_empty()))
                 {
                     continue;
                 }
                 let mut reexports_external = false;
                 for exp in &file.exports {
-                    if let Some(src) = exp.source_module.as_ref()
-                        && external_prod_modules.contains(src)
-                    {
+                    let target = exp.source_module.as_ref().or_else(|| {
+                        (exp.origin == ExportOrigin::ImportedBinding)
+                            .then(|| imported_targets[file_idx].get(exp.symbol.as_str()).copied())
+                            .flatten()
+                    });
+                    if target.is_some_and(|src| external_prod_modules.contains(src)) {
                         reexports_external = true;
                         break;
                     }
@@ -346,7 +354,7 @@ impl<'a> MockingChecker<'a> {
         let codebase = self.index.codebase();
         let mut helpers_by_file_name: HashMap<(FileId, &'a str), Vec<FuncId>> = HashMap::new();
         for func in codebase.functions() {
-            if self.index.is_test_func(func) && !func.decl.is_test() && func.decl.is_free_function()
+            if self.index.is_test_func(func) && !func.decl.role.is_test() && func.decl.is_free_function()
             {
                 helpers_by_file_name
                     .entry((func.file_id, func.decl.name.as_str()))
@@ -357,7 +365,7 @@ impl<'a> MockingChecker<'a> {
 
         let mut scratch: BfsScratch<FuncId> = BfsScratch::default();
         for func in codebase.functions() {
-            if !func.decl.is_test() {
+            if !func.decl.role.is_test() {
                 continue;
             }
             let assertions = func.decl.coupling.assertions;

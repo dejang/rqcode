@@ -33,7 +33,7 @@ impl ReturnTypeIndex {
                 continue;
             };
             if func.decl.is_free_function() {
-                if func.decl.is_test_code() {
+                if func.decl.role.is_test_code() {
                     test_in_file.insert((func.file_id, func.decl.name.clone()), ret_ty);
                 } else {
                     prod_in_file.insert((func.file_id, func.decl.name.clone()), ret_ty);
@@ -48,7 +48,7 @@ impl ReturnTypeIndex {
                         .or_insert(Some(ret_ty));
                 }
             } else if let Some(owner_id) = func.resolved_owner
-                && !func.decl.is_test_code()
+                && !func.decl.role.is_test_code()
             {
                 method.insert((owner_id, func.decl.name.clone()), ret_ty);
             }
@@ -105,7 +105,7 @@ impl FreeFuncTable {
             if !func.decl.is_free_function() {
                 continue;
             }
-            if func.decl.is_test_code() {
+            if func.decl.role.is_test_code() {
                 test_by_file.insert((func.file_id, func.decl.name.clone()), func.id);
             } else {
                 prod_by_file.insert((func.file_id, func.decl.name.clone()), func.id);
@@ -119,7 +119,7 @@ impl FreeFuncTable {
 
     fn lookup(&self, caller: &IndexedFunc, name: &str) -> Option<FuncId> {
         let key = (caller.file_id, name.to_string());
-        if caller.decl.is_test_code()
+        if caller.decl.role.is_test_code()
             && let Some(&fid) = self.test_by_file.get(&key)
         {
             return Some(fid);
@@ -281,7 +281,7 @@ impl<'a> FunctionBinder<'a> {
     ) -> bool {
         let mut changed = false;
         for func in functions.iter_mut() {
-            let is_test = func.decl.is_test_code();
+            let is_test = func.decl.role.is_test_code();
             for binding in &func.decl.local_bindings {
                 if func.resolved_local_types.contains_key(&binding.name) {
                     continue;

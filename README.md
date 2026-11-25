@@ -2,7 +2,7 @@
 
 **Language-agnostic static analysis and architectural quality gate for coding agents.**
 
-`rqcode` catches structural decay and LLM anti-patterns that compilers and standard linters miss: scattered domain concepts, leaky module boundaries, cyclic module dependencies, stateless methods attached to types, tests coupled to private internals, near-duplicate functions, overlapping tests, and redundant forwarding wrappers.
+`rqcode` catches structural decay and LLM anti-patterns that compilers and standard linters miss: scattered domain concepts, leaky module boundaries, barrel re-export modules, cyclic module dependencies, low-cohesion types, feature envy, architectural crossings, stateless methods attached to types, tests coupled to private internals, near-duplicate functions, overlapping tests, and redundant forwarding wrappers.
 
 It runs as a fast single-binary CLI (with text and JSON output) or as an embeddable Rust library, and supports **Rust**, **TypeScript**, and **Swift** out of the box through a strictly isolated, injectable language-frontend architecture.
 
@@ -112,9 +112,15 @@ Core rules operate exclusively on the resolved language-agnostic `Codebase` grap
 | `external-field-mutation` | Direct mutation of a type's fields from outside its defining module |
 | `split-impl` | Inherent methods for a type split across multiple modules |
 | `scattered-tests` | Unit tests for a type scattered outside its defining module |
-| `cyclic-module-dependency` | Circular import dependencies between modules (reported as SCC cycles) |
+| `cyclic-module-dependency` | Circular import and re-export dependencies between modules (reported as SCC cycles) |
 | `leaky-module-boundary` | Parent/child or sibling modules reaching directly into another module's internal fields/types (e.g., mutable-reference bag structs) |
 | `stateless-impl-method` | Methods placed on a type that take no instance receiver (`self`/`this`) and do not return the owner type (constructors/factories returning `Self` are allowed) |
+| `no-barrel-module` | Re-export barrel files (`index.ts` or pure re-export files) that obscure module boundaries and inflate transitive coupling (error by default; opt-in root exemption via `allow_library_root_barrel`) |
+| `low-cohesion-type` | Stateful types splitting into multiple disjoint behavioral clusters (`TCC` + connected components + TF-IDF conceptual dissimilarity; advisory warning by default) |
+| `feature-envy` | Methods or functions accessing another behavioral type's members far more than their own (`ATFD`, `FDP`, `LAA` + TF-IDF conceptual affinity; advisory warning by default) |
+| `architectural-crossing` | Non-entrypoint, non-barrel modules sitting simultaneously in the upper quantile of both fan-in and fan-out within their language graph (advisory warning by default) |
+
+See [docs/cohesion.md](docs/cohesion.md) for the literature survey, formal definitions, per-language mappings, false-positive boundaries, and design rationale.
 
 #### 2. Test Coupling (`test-coupling`)
 | Diagnostic ID | What it catches |
@@ -180,11 +186,40 @@ min_external_modules = 2
 flag_external_field_mutation = true
 flag_test_scatter = true
 severity = "error"
+advisory_severity = "warning"
 
 [cohesion.boundaries]
 flag_cyclic_modules = true
 flag_leaky_boundaries = true
 flag_stateless_impl_methods = true
+flag_barrel_modules = true
+allow_library_root_barrel = false
+max_barrel_related = 3
+
+[cohesion.type_cohesion]
+enabled = true
+min_fields = 4
+min_methods = 5
+min_field_using_methods = 4
+min_component_methods = 2
+max_accessor_nodes = 10
+max_tcc = 0.50
+max_conceptual_similarity = 0.20
+
+[cohesion.feature_envy]
+enabled = true
+min_foreign_accesses = 3
+max_foreign_providers = 2
+max_laa = 0.34
+min_conceptual_affinity = 0.15
+
+[cohesion.crossing]
+enabled = true
+min_graph_modules = 12
+min_fan_in = 4
+min_fan_out = 4
+quantile = 0.90
+max_related_edges = 3
 
 [test_coupling]
 enabled = true

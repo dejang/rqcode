@@ -5,3 +5,8 @@ rule = "external-field-mutation"
 file = "src/checkout.ts"
 message_contains = "Order"
 related_files = ["src/models/order.ts"]
+
+[[diagnostics]]
+rule = "no-barrel-module"
+file = "src/models/index.ts"
+message_contains = "barrel"

@@ -1,11 +1,16 @@
 mod boundaries;
+mod feature_envy;
+mod graph;
+pub mod lexical;
+pub mod type_cohesion;
 
 use crate::ast::ModulePath;
-use crate::ast::codebase::{Codebase, ExternalFuncUsage, IndexedType};
+use crate::ast::codebase::{Codebase, ExternalFuncUsage, FuncId, IndexedFunc, IndexedType, TypeId};
 use crate::config::{CohesionConfig, Config};
 use crate::diagnostic::{Diagnostic, Span};
 use crate::rules::Rule;
-use std::collections::BTreeSet;
+use lexical::{LexicalCorpus, LexicalParams};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Diagnostic IDs emitted by [`CohesionRule`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,6 +22,10 @@ pub enum CohesionRuleId {
     CyclicModuleDependency,
     LeakyModuleBoundary,
     StatelessImplMethod,
+    NoBarrelModule,
+    LowCohesionType,
+    FeatureEnvy,
+    ArchitecturalCrossing,
 }
 
 struct DiagnosticText {
@@ -35,6 +44,10 @@ impl CohesionRuleId {
             Self::CyclicModuleDependency => "cyclic-module-dependency",
             Self::LeakyModuleBoundary => "leaky-module-boundary",
             Self::StatelessImplMethod => "stateless-impl-method",
+            Self::NoBarrelModule => "no-barrel-module",
+            Self::LowCohesionType => "low-cohesion-type",
+            Self::FeatureEnvy => "feature-envy",
+            Self::ArchitecturalCrossing => "architectural-crossing",
         }
     }
 
@@ -64,9 +77,10 @@ impl CohesionRuleId {
 /// - direct field mutations outside a type's defining module
 /// - type methods split across multiple modules
 /// - unit tests scattered across other modules instead of co-located with the type
-/// - cyclic dependencies between non-ancestor modules
+/// - cyclic dependencies and high fan-in/fan-out crossings between non-ancestor modules
 /// - leaky internal type boundaries (mutable reference bags and external field reach-in)
 /// - stateless methods that neither take an instance receiver nor return an instance of the owner type
+/// - barrel re-export modules, low-cohesion types, and feature-envious methods
 pub struct CohesionRule;
 
 impl Rule for CohesionRule {
@@ -75,7 +89,7 @@ impl Rule for CohesionRule {
     }
 
     fn description(&self) -> &'static str {
-        "Detects scattered type helpers, external field mutation, split methods, scattered tests, cyclic modules, leaky boundaries, and stateless methods"
+        "Detects scattered type helpers, external field mutation, split methods, scattered tests, cyclic modules, architectural crossings, leaky boundaries, stateless methods, barrel modules, low-cohesion types, and feature envy"
     }
 
     fn check(&self, codebase: &Codebase, config: &Config) -> Vec<Diagnostic> {
@@ -84,8 +98,14 @@ impl Rule for CohesionRule {
             return Vec::new();
         }
         let mut diagnostics = Vec::new();
-        if cfg.boundaries.flag_cyclic_modules {
-            diagnostics.extend(boundaries::check_cyclic_modules(codebase, cfg));
+        if cfg.boundaries.flag_cyclic_modules || cfg.crossing.enabled {
+            let module_graph = graph::ModuleGraph::build(codebase);
+            if cfg.boundaries.flag_cyclic_modules {
+                diagnostics.extend(module_graph.check_cyclic_modules(cfg));
+            }
+            if cfg.crossing.enabled {
+                diagnostics.extend(module_graph.check_architectural_crossings(cfg));
+            }
         }
         if cfg.boundaries.flag_leaky_boundaries {
             diagnostics.extend(boundaries::check_leaky_boundaries(codebase, cfg));
@@ -93,7 +113,28 @@ impl Rule for CohesionRule {
         if cfg.boundaries.flag_stateless_impl_methods {
             diagnostics.extend(boundaries::check_stateless_impl_methods(codebase, cfg));
         }
-        CohesionChecker::new(codebase, cfg).check_types(&mut diagnostics);
+        if cfg.boundaries.barrels.flag_barrel_modules {
+            diagnostics.extend(boundaries::check_barrel_modules(codebase, cfg));
+        }
+        let checker = CohesionChecker::new(codebase, cfg);
+        let external_mutations = checker.check_external_field_mutations(&mut diagnostics);
+        checker.check_types(&mut diagnostics);
+        if cfg.type_cohesion.enabled || cfg.feature_envy.enabled {
+            let corpus = LexicalCorpus::build(codebase, LexicalParams::default());
+            if cfg.type_cohesion.enabled {
+                diagnostics.extend(type_cohesion::check_low_cohesion_types(
+                    codebase, cfg, &corpus,
+                ));
+            }
+            if cfg.feature_envy.enabled {
+                diagnostics.extend(feature_envy::check_feature_envy(
+                    codebase,
+                    cfg,
+                    &corpus,
+                    &external_mutations,
+                ));
+            }
+        }
         diagnostics
     }
 }
@@ -108,6 +149,84 @@ impl<'a> CohesionChecker<'a> {
         Self { codebase, cfg }
     }
 
+    fn check_external_field_mutations(
+        &self,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> HashSet<(FuncId, TypeId)> {
+        let mut emitted = HashSet::new();
+        if !self.cfg.flag_external_field_mutation {
+            return emitted;
+        }
+        let declared_fields: HashMap<TypeId, HashSet<&str>> = self
+            .codebase
+            .types()
+            .iter()
+            .filter(|ty| {
+                ty.decl.is_stateful_type()
+                    && !ty.decl.in_test_module
+                    && !self.codebase.file(ty.file_id).is_test_file()
+            })
+            .map(|ty| {
+                let names = ty.decl.fields.iter().map(|f| f.name.as_str()).collect();
+                (ty.id, names)
+            })
+            .collect();
+
+        let mut type_order: Vec<TypeId> = Vec::new();
+        let mut mutated_fields: HashMap<TypeId, Vec<&str>> = HashMap::new();
+        let mut seen_fields: HashSet<(TypeId, &str)> = HashSet::new();
+
+        for func in self.codebase.functions() {
+            if func.decl.role.is_test_code() || self.codebase.file(func.file_id).is_test_file() {
+                continue;
+            }
+            type_order.clear();
+            mutated_fields.clear();
+            seen_fields.clear();
+
+            for (access, resolved_ty) in func
+                .decl
+                .field_accesses
+                .iter()
+                .zip(&func.resolved_field_accesses)
+            {
+                let Some(type_id) = *resolved_ty else {
+                    continue;
+                };
+                if !access.is_write
+                    || access.receiver_is_self
+                    || func.resolved_owner == Some(type_id)
+                {
+                    continue;
+                }
+                let Some(valid_fields) = declared_fields.get(&type_id) else {
+                    continue;
+                };
+                let ty = self.codebase.ty(type_id);
+                let field_name = access.field_name.as_str();
+                if func.module_path == ty.module_path || !valid_fields.contains(field_name) {
+                    continue;
+                }
+                if seen_fields.insert((type_id, field_name)) {
+                    let entry = mutated_fields.entry(type_id).or_insert_with(|| {
+                        type_order.push(type_id);
+                        Vec::new()
+                    });
+                    entry.push(field_name);
+                }
+            }
+
+            for &type_id in &type_order {
+                if let Some(fields) = mutated_fields.get(&type_id) {
+                    let ty = self.codebase.ty(type_id);
+                    emitted.insert((func.id, type_id));
+                    diagnostics.push(self.build_external_mutation(func, ty, fields));
+                }
+            }
+        }
+        emitted
+    }
+
     fn check_types(&self, diagnostics: &mut Vec<Diagnostic>) {
         let mut external_modules: BTreeSet<&ModulePath> = BTreeSet::new();
         let mut test_modules: BTreeSet<&ModulePath> = BTreeSet::new();
@@ -120,12 +239,25 @@ impl<'a> CohesionChecker<'a> {
                 continue;
             }
 
-            let inherent_methods = self.codebase.inherent_methods_for(ty.id);
+            let inherent_behavioral_methods = self
+                .codebase
+                .inherent_methods_for(ty.id)
+                .into_iter()
+                .filter(|m| {
+                    !m.decl.role.is_test_code()
+                        && !self.codebase.file(m.file_id).is_test_file()
+                        && !m.decl.is_lifecycle
+                        && m.decl.has_self_receiver()
+                        && !m.decl.returns_self_type()
+                        && m.resolved_return_type != Some(ty.id)
+                })
+                .count();
+
             let mut relevant_externals = self.codebase.external_free_functions_for(ty.id);
             relevant_externals.retain(|usage| {
                 usage.mutates_fields()
-                    || (usage.takes_mut_ref && usage.other_project_type_params == 0)
-                    || (usage.accesses_fields() && usage.other_project_type_params == 0)
+                    || (usage.takes_mut_ref && usage.other_project_types == 0)
+                    || (usage.accesses_fields() && usage.other_project_types == 0)
             });
 
             external_modules.clear();
@@ -135,22 +267,25 @@ impl<'a> CohesionChecker<'a> {
                 if usage.takes_mut_ref || usage.mutates_fields() {
                     has_external_mutation = true;
                 }
-                if self.cfg.flag_external_field_mutation && usage.mutates_fields() {
-                    diagnostics.push(self.build_external_mutation(ty, usage));
-                }
             }
+
+            let is_pure_read_only_dto = (ty.decl.has_implicit_field_readers
+                || ty.decl.is_immutable_record)
+                && ty.decl.exposed_field_count() == ty.decl.fields.len()
+                && inherent_behavioral_methods == 0
+                && !has_external_mutation;
 
             let exceeds_module_scatter = relevant_externals.len()
                 >= self.cfg.min_external_functions
                 && external_modules.len() >= self.cfg.min_external_modules;
             let anemic_with_mutators = has_external_mutation
                 && relevant_externals.len() >= self.cfg.min_external_functions
-                && relevant_externals.len() > inherent_methods.len();
+                && relevant_externals.len() > inherent_behavioral_methods;
 
-            if exceeds_module_scatter || anemic_with_mutators {
+            if !is_pure_read_only_dto && (exceeds_module_scatter || anemic_with_mutators) {
                 diagnostics.push(self.build_scattered_concept(
                     ty,
-                    inherent_methods.len(),
+                    inherent_behavioral_methods,
                     &relevant_externals,
                     external_modules.len(),
                 ));
@@ -250,18 +385,24 @@ impl<'a> CohesionChecker<'a> {
 
     fn build_external_mutation(
         &self,
+        func: &IndexedFunc,
         ty: &IndexedType,
-        usage: &ExternalFuncUsage<'_>,
+        mutated_fields: &[&str],
     ) -> Diagnostic {
+        let kind_label = if func.decl.is_free_function() {
+            "free function"
+        } else {
+            "method"
+        };
+        let display_name = func.display_name();
         Diagnostic::new(
             CohesionRuleId::ExternalFieldMutation.as_str(),
             self.cfg.severity,
-            usage.func.decl.span.clone(),
+            func.decl.span.clone(),
             format!(
-                "free function `{}` in `{}` directly mutates field(s) [{}] of `{}` (defined in `{}`)",
-                usage.func.decl.name,
-                usage.func.module_path,
-                usage.direct_field_writes.join(", "),
+                "{kind_label} `{display_name}` in `{}` directly mutates field(s) [{}] of `{}` (defined in `{}`)",
+                func.module_path,
+                mutated_fields.join(", "),
                 ty.decl.name,
                 ty.module_path
             ),
@@ -271,8 +412,7 @@ impl<'a> CohesionChecker<'a> {
             format!("`{}` defined here", ty.decl.name),
         )
         .with_suggestion(format!(
-            "Move `{}` onto `{}` in `{}` and make the mutated field(s) private.",
-            usage.func.decl.name,
+            "Move `{display_name}` onto `{}` in `{}` and make the mutated field(s) private.",
             ty.decl.name,
             ty.decl.span.file().display()
         ))

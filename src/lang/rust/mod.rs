@@ -244,8 +244,8 @@ mod tests {
         assert_eq!(adjust_fn.field_accesses[0].field_name, "total");
 
         let test_fn = &ast.functions[2];
-        assert!(test_fn.is_test());
-        assert!(test_fn.is_test_code());
+        assert!(test_fn.role.is_test());
+        assert!(test_fn.role.is_test_code());
         assert!(
             test_fn
                 .constructed_types

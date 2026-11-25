@@ -52,9 +52,9 @@ impl Rule for SimilarityRule {
         let mut test_corpora: BTreeMap<LanguageId, SimilarityCorpus> = BTreeMap::new();
         for func in codebase.functions() {
             let file = codebase.file(func.file_id);
-            let target = if func.decl.is_test() {
+            let target = if func.decl.role.is_test() {
                 Some(&mut test_corpora)
-            } else if !func.decl.is_test_code() && !file.is_test_file() {
+            } else if !func.decl.role.is_test_code() && !file.is_test_file() {
                 Some(&mut prod_corpora)
             } else {
                 None

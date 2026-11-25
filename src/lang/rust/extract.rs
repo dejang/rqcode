@@ -1,13 +1,14 @@
 use super::TsNode;
-use super::body::{BodyWalker, ExtractedBody};
+use super::body::BodyWalker;
 use super::syntax;
 use crate::ast::item::{
-    ConditionalGuard, ExportDecl, FieldDecl, FunctionDecl, FunctionRole, ImportDecl, ImportKind,
+    ConditionalGuard, ExportBinding, ExportDecl, ExportOrigin, FieldDecl, FunctionDecl, FunctionRole, ImportDecl, ImportKind,
     InterfaceImpl, ModuleDecl, ParamAccess, SubclassPolicy, TypeDecl, TypeKind, TypeRef,
     Visibility,
 };
-use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
+use crate::ast::{BarrelKind, FileAst, FileRole, ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
+use crate::lang::common::FunctionHeader;
 use std::collections::HashSet;
 
 struct UseContext<'a> {
@@ -53,7 +54,7 @@ impl<'a> RustExtractor<'a> {
             language: self.tree.language_id(),
             member_separator: self.tree.language().member_separator(),
             role,
-            is_barrel: false,
+            barrel_kind: BarrelKind::None,
             module_decls: self.module_decls,
             imports: self.imports,
             exports: self.exports,
@@ -181,6 +182,8 @@ impl<'a> RustExtractor<'a> {
                     is_default: false,
                     is_wildcard: true,
                     visibility: reexport_vis,
+                    origin: ExportOrigin::DirectInternal,
+                    span: ctx.span.clone(),
                 });
             } else if !normalized_symbol.is_empty() {
                 let exported_name = alias.clone().unwrap_or_else(|| normalized_symbol.clone());
@@ -191,6 +194,8 @@ impl<'a> RustExtractor<'a> {
                     is_default: false,
                     is_wildcard: false,
                     visibility: reexport_vis,
+                    origin: ExportOrigin::DirectInternal,
+                    span: ctx.span.clone(),
                 });
             }
         }
@@ -320,8 +325,9 @@ impl<'a> RustExtractor<'a> {
             kind: TypeKind::Struct,
             visibility,
             in_test_module,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers,
+            is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed,
             base_types: Vec::new(),
             fields,
@@ -399,8 +405,9 @@ impl<'a> RustExtractor<'a> {
             kind: TypeKind::Enum,
             visibility: syntax::extract_visibility(node),
             in_test_module,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers,
+            is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed,
             base_types: Vec::new(),
             fields: Vec::new(),
@@ -420,8 +427,9 @@ impl<'a> RustExtractor<'a> {
             kind: TypeKind::Interface,
             visibility,
             in_test_module,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers: false,
+            is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed,
             base_types: syntax::extract_trait_supertraits(node),
             fields: Vec::new(),
@@ -549,41 +557,23 @@ impl<'a> RustExtractor<'a> {
             .field("return_type")
             .and_then(|t| syntax::extract_base_type(&t).0);
 
-        let ExtractedBody {
-            body_tree,
-            field_accesses,
-            calls,
-            constructed_types,
-            local_bindings,
-            field_inits,
-            referenced_idents,
-            scoped_ident_refs,
-            coupling,
-        } = BodyWalker::new(self.tree).extract(node.field("body"));
-
-        Some(FunctionDecl {
-            name,
-            owner_type,
-            is_interface_impl,
-            interface_name,
-            self_receiver,
-            visibility,
-            explicit_visibility: syntax::has_explicit_visibility(node),
-            is_default_export: false,
-            role,
-            conditional_guard: ConditionalGuard::None,
-            params,
-            return_type,
-            body_tree,
-            field_accesses,
-            calls,
-            constructed_types,
-            local_bindings,
-            field_inits,
-            referenced_idents,
-            scoped_ident_refs,
-            coupling,
-            span: self.tree.node_span(node),
-        })
+        let body = BodyWalker::new(self.tree).extract(node.field("body"));
+        Some(body.into_function_decl(
+            FunctionHeader {
+                name,
+                owner_type,
+                is_interface_impl,
+                interface_name,
+                self_receiver,
+                visibility,
+                explicit_visibility: syntax::has_explicit_visibility(node),
+                export_binding: ExportBinding::Standard,
+                is_lifecycle: false,
+                role,
+                params,
+                return_type,
+            },
+            self.tree.node_span(node),
+        ))
     }
 }

@@ -211,7 +211,7 @@ impl<'a> TestCouplingIndex<'a> {
     }
 
     pub(super) fn is_test_func(&self, func: &IndexedFunc) -> bool {
-        func.decl.is_test_code() || self.codebase.file(func.file_id).is_test_file()
+        func.decl.role.is_test_code() || self.codebase.file(func.file_id).is_test_file()
     }
 
     pub(super) fn is_test_type(&self, ty: &IndexedType) -> bool {
@@ -241,7 +241,7 @@ impl<'a> TestCouplingIndex<'a> {
             }
             self.prod_types_by_mod_name
                 .insert((&ty.module_path, ty.decl.name.as_str()), ty.id);
-            if ty.decl.is_default_export {
+            if ty.decl.export_binding.is_default() {
                 self.prod_default_type_by_mod.insert(&ty.module_path, ty.id);
             }
             for field in &ty.decl.fields {
@@ -278,7 +278,7 @@ impl<'a> TestCouplingIndex<'a> {
                     .entry(func.decl.name.as_str())
                     .or_default()
                     .push(func.id);
-                if func.decl.is_default_export {
+                if func.decl.export_binding.is_default() {
                     self.prod_default_func_by_mod
                         .insert(&func.module_path, func.id);
                 }

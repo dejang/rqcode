@@ -1,11 +1,11 @@
 use rqcode::ast::codebase::Codebase;
 use rqcode::ast::item::{
-    ConditionalGuard, ExportDecl, FunctionCouplingFacts, FunctionDecl, FunctionRole, ImportDecl,
+    ConditionalGuard, ExportBinding, ExportDecl, ExportOrigin, FunctionCouplingFacts, FunctionDecl, FunctionRole, ImportDecl,
     ImportKind, ImportOrigin, ParamAccess, ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef,
     Visibility,
 };
 use rqcode::ast::similarity::NormalizedTree;
-use rqcode::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
+use rqcode::ast::{BarrelKind, FileAst, FileRole, ModulePath, SyntaxTree};
 use rqcode::config::Config;
 use rqcode::diagnostic::Span;
 use rqcode::lang::LanguageFrontend;
@@ -20,8 +20,9 @@ fn make_type(name: &str, file: &str, is_default_export: bool) -> TypeDecl {
         kind: TypeKind::Class,
         visibility: Visibility::Public,
         in_test_module: false,
-        is_default_export,
+        export_binding: ExportBinding::from_is_default(is_default_export),
         has_implicit_field_readers: false,
+        is_immutable_record: false,
         subclass_policy: SubclassPolicy::Closed,
         base_types: Vec::new(),
         fields: Vec::new(),
@@ -44,7 +45,8 @@ fn make_fn_with_param(
         self_receiver: None,
         visibility: Visibility::Public,
             explicit_visibility: false,
-        is_default_export: false,
+        export_binding: ExportBinding::Standard,
+        is_lifecycle: false,
         role: FunctionRole::Production,
         conditional_guard: ConditionalGuard::None,
         params: vec![ParamDecl {
@@ -90,7 +92,7 @@ fn make_file(rel: &str, module: &[&str], sep: &'static str) -> (SyntaxTree, File
         language: spec.id(),
         member_separator: sep,
         role: FileRole::Module,
-            is_barrel: false,
+            barrel_kind: BarrelKind::None,
             module_decls: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
@@ -121,31 +123,20 @@ fn resolves_default_namespace_and_barrel_reexports_and_formats_member_separator(
     f2.types = vec![make_type("Order", "src/legacy/order.ts", false)];
 
     let (t3, mut f3) = make_file("src/models/index.ts", &["src", "models"], ".");
+    let reexport = |symbol: &str, exported: &str, is_default: bool, is_wildcard: bool, line: usize| ExportDecl {
+        source_module: Some(order_mod.clone()),
+        symbol: symbol.to_string(),
+        exported_name: exported.to_string(),
+        is_default,
+        is_wildcard,
+        visibility: Visibility::Public,
+        origin: ExportOrigin::DirectInternal,
+        span: Span::new("src/models/index.ts", line, 1, line, 40),
+    };
     f3.exports = vec![
-        ExportDecl {
-            source_module: Some(order_mod.clone()),
-            symbol: String::new(),
-            exported_name: String::new(),
-            is_default: false,
-            is_wildcard: true,
-            visibility: Visibility::Public,
-        },
-        ExportDecl {
-            source_module: Some(order_mod.clone()),
-            symbol: "Order".to_string(),
-            exported_name: "CustomerOrder".to_string(),
-            is_default: false,
-            is_wildcard: false,
-            visibility: Visibility::Public,
-        },
-        ExportDecl {
-            source_module: Some(order_mod.clone()),
-            symbol: "default".to_string(),
-            exported_name: "default".to_string(),
-            is_default: true,
-            is_wildcard: false,
-            visibility: Visibility::Public,
-        },
+        reexport("", "", false, true, 1),
+        reexport("Order", "CustomerOrder", false, false, 2),
+        reexport("default", "default", true, false, 3),
     ];
 
     let (t4, mut f4) = make_file("src/service.ts", &["src", "service"], ".");
@@ -225,6 +216,8 @@ fn cyclic_barrel_reexports_terminate_cleanly() {
         is_default: false,
         is_wildcard: true,
         visibility: Visibility::Public,
+        origin: ExportOrigin::DirectInternal,
+        span: Span::new("src/a.ts", 1, 1, 1, 25),
     });
 
     let (t2, mut f2) = make_file("src/b.ts", &["src", "b"], ".");
@@ -235,6 +228,8 @@ fn cyclic_barrel_reexports_terminate_cleanly() {
         is_default: false,
         is_wildcard: true,
         visibility: Visibility::Public,
+        origin: ExportOrigin::DirectInternal,
+        span: Span::new("src/b.ts", 1, 1, 1, 25),
     });
 
     let (t3, mut f3) = make_file("src/c.ts", &["src", "c"], ".");

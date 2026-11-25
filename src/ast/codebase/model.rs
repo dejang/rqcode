@@ -80,7 +80,7 @@ pub struct ExternalFuncUsage<'a> {
     pub takes_mut_ref: bool,
     pub direct_field_reads: Vec<String>,
     pub direct_field_writes: Vec<String>,
-    pub other_project_type_params: usize,
+    pub other_project_types: usize,
 }
 
 impl ExternalFuncUsage<'_> {

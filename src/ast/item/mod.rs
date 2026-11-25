@@ -1,3 +1,10 @@
+mod coupling;
+
+pub use self::coupling::{
+    AssertionSummary, EncapsulationEscape, FunctionCouplingFacts, ModuleMock, ReprAssertion,
+    SpySite, TestHookSite,
+};
+
 use crate::ast::ModulePath;
 use crate::ast::similarity::NormalizedTree;
 use crate::diagnostic::Span;
@@ -23,6 +30,30 @@ impl Visibility {
     #[must_use]
     pub fn is_externally_visible(self) -> bool {
         matches!(self, Self::Public | Self::Internal)
+    }
+}
+
+/// Whether a declaration is exported as the module's default export or a standard binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ExportBinding {
+    #[default]
+    Standard,
+    Default,
+}
+
+impl ExportBinding {
+    #[must_use]
+    pub const fn is_default(self) -> bool {
+        matches!(self, Self::Default)
+    }
+
+    #[must_use]
+    pub const fn from_is_default(is_default: bool) -> Self {
+        if is_default {
+            Self::Default
+        } else {
+            Self::Standard
+        }
     }
 }
 
@@ -104,10 +135,13 @@ pub struct TypeDecl {
     pub kind: TypeKind,
     pub visibility: Visibility,
     pub in_test_module: bool,
-    pub is_default_export: bool,
+    pub export_binding: ExportBinding,
     /// Whether generated/compiler-synthesized code (e.g., serialization or structural equality)
     /// implicitly reads all fields of this type.
     pub has_implicit_field_readers: bool,
+    /// Whether this nominal record type has >= 1 declared instance field and every declared
+    /// instance field is immutable/read-only (orthogonal to `has_implicit_field_readers`).
+    pub is_immutable_record: bool,
     pub subclass_policy: SubclassPolicy,
     pub base_types: Vec<TypeRef>,
     pub fields: Vec<FieldDecl>,
@@ -261,6 +295,20 @@ impl ImportDecl {
     }
 }
 
+/// Semantic origin of an [`ExportDecl`] distinguishing local exports from re-exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ExportOrigin {
+    /// Local declaration or `export { localIdent }` defined in this file.
+    #[default]
+    Local,
+    /// `export { X }` / `export default X` re-exporting an identifier matching a non-test import in this file.
+    ImportedBinding,
+    /// Direct re-export (`export ... from "..."`, `pub use ...`, `@_exported import ...`) targeting a frontend-resolved module path.
+    DirectInternal,
+    /// Direct re-export (`export ... from "..."`) targeting an unresolved external package or path alias.
+    DirectExternal,
+}
+
 /// Export or re-export declaration used for cross-module and barrel resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportDecl {
@@ -274,6 +322,15 @@ pub struct ExportDecl {
     /// When `true` and `exported_name` is empty, re-exports all symbols flatly; when `exported_name` is non-empty, re-exports `source_module` as a namespace.
     pub is_wildcard: bool,
     pub visibility: Visibility,
+    pub origin: ExportOrigin,
+    pub span: Span,
+}
+
+impl ExportDecl {
+    #[must_use]
+    pub const fn is_reexport(&self) -> bool {
+        !matches!(self.origin, ExportOrigin::Local)
+    }
 }
 
 /// Semantic role of a function/method within a file.
@@ -290,86 +347,20 @@ pub enum FunctionRole {
     TestHelper,
 }
 
-/// Test-environment conditional hook inside production code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestHookSite {
-    pub label: String,
-    pub span: Span,
-}
-
-/// Runtime reflection or encapsulation-escape mechanism used by a test.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncapsulationEscape {
-    pub mechanism: String,
-    pub target_receiver: Option<CallReceiver>,
-    pub span: Span,
-}
-
-/// Module-level mock replacing a dependency in a test file or test body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleMock {
-    pub resolved_module: Option<ModulePath>,
-    pub raw_specifier: String,
-    pub origin: ImportOrigin,
-    pub in_test_context: bool,
-    pub span: Span,
-}
-
-/// Spy installed on a receiver method inside a test.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpySite {
-    pub target_receiver: Option<CallReceiver>,
-    pub method_name: String,
-    pub span: Span,
-}
-
-/// Breakdown of behavioral vs mock-interaction assertions inside a test function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AssertionSummary {
-    pub interaction_count: u32,
-    pub behavioral_count: u32,
-}
-
-impl AssertionSummary {
-    pub const fn record_interaction(&mut self) {
-        self.interaction_count += 1;
+impl FunctionRole {
+    #[must_use]
+    pub const fn is_test(self) -> bool {
+        matches!(self, Self::Test)
     }
 
-    pub const fn record_behavioral(&mut self) {
-        self.behavioral_count += 1;
-    }
-}
-
-/// Exact-equality assertion on a value's debug/internal representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReprAssertion {
-    pub target_receiver: Option<CallReceiver>,
-    pub span: Span,
-}
-
-/// Cohesive test-coupling evidence extracted from a function body.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct FunctionCouplingFacts {
-    pub test_hooks: Vec<TestHookSite>,
-    pub encapsulation_escapes: Vec<EncapsulationEscape>,
-    pub module_mocks: Vec<ModuleMock>,
-    pub spy_sites: Vec<SpySite>,
-    pub assertions: AssertionSummary,
-    pub repr_assertions: Vec<ReprAssertion>,
-    pub has_ambient_io: bool,
-}
-
-impl FunctionCouplingFacts {
-    pub const fn record_interaction_assertion(&mut self) {
-        self.assertions.record_interaction();
+    #[must_use]
+    pub const fn is_test_code(self) -> bool {
+        matches!(self, Self::Test | Self::TestHelper)
     }
 
-    pub const fn record_behavioral_assertion(&mut self) {
-        self.assertions.record_behavioral();
-    }
-
-    pub const fn mark_ambient_io(&mut self) {
-        self.has_ambient_io = true;
+    #[must_use]
+    pub const fn is_entrypoint(self) -> bool {
+        matches!(self, Self::Entrypoint)
     }
 }
 
@@ -382,7 +373,9 @@ pub struct FunctionDecl {
     pub self_receiver: Option<ParamAccess>,
     pub visibility: Visibility,
     pub explicit_visibility: bool,
-    pub is_default_export: bool,
+    pub export_binding: ExportBinding,
+    /// Language-defined lifecycle hook (e.g., TypeScript `constructor`, Swift `init`/`deinit`).
+    pub is_lifecycle: bool,
     pub role: FunctionRole,
     pub conditional_guard: ConditionalGuard,
     pub params: Vec<ParamDecl>,
@@ -422,21 +415,6 @@ impl FunctionDecl {
                 (&self.owner_type, &self.return_type),
                 (Some(owner), Some(TypeRef::Named(ret))) if owner == ret
             )
-    }
-
-    #[must_use]
-    pub const fn is_test(&self) -> bool {
-        matches!(self.role, FunctionRole::Test)
-    }
-
-    #[must_use]
-    pub const fn is_test_code(&self) -> bool {
-        matches!(self.role, FunctionRole::Test | FunctionRole::TestHelper)
-    }
-
-    #[must_use]
-    pub const fn is_entrypoint(&self) -> bool {
-        matches!(self.role, FunctionRole::Entrypoint)
     }
 
     #[must_use]
@@ -513,34 +491,31 @@ mod tests {
 
     #[test]
     fn type_decl_identifies_stateful_exposed_fields() {
+        let mk_field = |name: &str,
+                        visibility: Visibility,
+                        explicit_visibility: bool,
+                        line: usize| FieldDecl {
+            name: name.to_string(),
+            type_name: Some(TypeRef::Named("u64".to_string())),
+            visibility,
+            explicit_visibility,
+            is_mut_ref: false,
+            conditional_guard: ConditionalGuard::None,
+            span: Span::new("src/order.rs", line, 5, line, 19),
+        };
         let ty = TypeDecl {
             name: "Order".to_string(),
             kind: TypeKind::Struct,
             visibility: Visibility::Public,
             in_test_module: false,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers: false,
+            is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed,
             base_types: Vec::new(),
             fields: vec![
-                FieldDecl {
-                    name: "total".to_string(),
-                    type_name: Some(TypeRef::Named("u64".to_string())),
-                    visibility: Visibility::Public,
-                    explicit_visibility: true,
-                    is_mut_ref: false,
-                    conditional_guard: ConditionalGuard::None,
-                    span: Span::new("src/order.rs", 2, 5, 2, 19),
-                },
-                FieldDecl {
-                    name: "id".to_string(),
-                    type_name: Some(TypeRef::Named("u64".to_string())),
-                    visibility: Visibility::Private,
-                    explicit_visibility: false,
-                    is_mut_ref: false,
-                    conditional_guard: ConditionalGuard::None,
-                    span: Span::new("src/order.rs", 3, 5, 3, 12),
-                },
+                mk_field("total", Visibility::Public, true, 2),
+                mk_field("id", Visibility::Private, false, 3),
             ],
             annotations: vec!["Debug".to_string()],
             span: Span::new("src/order.rs", 1, 1, 4, 2),
@@ -549,15 +524,5 @@ mod tests {
         assert!(ty.is_stateful_type());
         assert_eq!(ty.exposed_field_count(), 1);
         assert!(ty.has_annotation("Debug"));
-    }
-
-    #[test]
-    fn coupling_facts_track_interaction_and_behavioral_assertions() {
-        let mut facts = FunctionCouplingFacts::default();
-        facts.record_interaction_assertion();
-        facts.record_behavioral_assertion();
-        facts.record_interaction_assertion();
-        assert_eq!(facts.assertions.interaction_count, 2);
-        assert_eq!(facts.assertions.behavioral_count, 1);
     }
 }

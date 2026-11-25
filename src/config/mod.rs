@@ -1,3 +1,10 @@
+mod cohesion;
+
+pub use self::cohesion::{
+    BarrelPolicyConfig, CohesionConfig, CrossingConfig, FeatureEnvyConfig, ModuleBoundaryConfig,
+    TypeCohesionConfig,
+};
+
 use crate::ast::similarity::{EligibilityConfig, SimilarityParams};
 use crate::diagnostic::Severity;
 use serde::{Deserialize, Serialize};
@@ -154,50 +161,6 @@ impl SimilarityConfig {
                 min_distinct_kinds: self.min_distinct_kinds,
             },
             ..SimilarityParams::default()
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModuleBoundaryConfig {
-    pub flag_cyclic_modules: bool,
-    pub flag_leaky_boundaries: bool,
-    pub flag_stateless_impl_methods: bool,
-}
-
-impl Default for ModuleBoundaryConfig {
-    fn default() -> Self {
-        Self {
-            flag_cyclic_modules: true,
-            flag_leaky_boundaries: true,
-            flag_stateless_impl_methods: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CohesionConfig {
-    pub enabled: bool,
-    pub min_external_functions: usize,
-    pub min_external_modules: usize,
-    pub flag_external_field_mutation: bool,
-    pub flag_test_scatter: bool,
-    pub boundaries: ModuleBoundaryConfig,
-    pub severity: Severity,
-}
-
-impl Default for CohesionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            min_external_functions: 2,
-            min_external_modules: 2,
-            flag_external_field_mutation: true,
-            flag_test_scatter: true,
-            boundaries: ModuleBoundaryConfig::default(),
-            severity: Severity::Error,
         }
     }
 }

@@ -74,7 +74,7 @@ pub(super) struct SurfaceData {
 /// Language-agnostic public API surface model for a [`super::Codebase`].
 ///
 /// Combines per-language module trees (`FileRole::LibraryRoot` + `ModuleDecl` + `ExportDecl`),
-/// directory barrel boundaries (`FileAst::is_barrel` + `ExportDecl`), public signature type
+/// directory barrel boundaries (`FileAst::is_directory_barrel` + `ExportDecl`), public signature type
 /// reachability, and package-level visibility declarations into a uniform [`EffectiveVisibility`] API.
 pub struct PublicSurface {
     active_languages: HashSet<LanguageId>,
@@ -175,7 +175,7 @@ impl PublicSurface {
             &ty.module_path,
             &ty.decl.name,
             ty.decl.visibility,
-            ty.decl.is_default_export,
+            ty.decl.export_binding.is_default(),
         )
     }
 
@@ -210,7 +210,7 @@ impl PublicSurface {
             &func.module_path,
             &func.decl.name,
             func.decl.visibility,
-            func.decl.is_default_export,
+            func.decl.export_binding.is_default(),
         )
     }
 
@@ -241,7 +241,7 @@ impl PublicSurface {
                 &ty.module_path,
                 &ty.decl.name,
                 ty.decl.visibility,
-                ty.decl.is_default_export,
+                ty.decl.export_binding.is_default(),
             ),
         )
     }
@@ -284,7 +284,7 @@ impl PublicSurface {
                 &func.module_path,
                 &func.decl.name,
                 func.decl.visibility,
-                func.decl.is_default_export,
+                func.decl.export_binding.is_default(),
             ),
         )
     }

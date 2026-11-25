@@ -1,5 +1,5 @@
 use super::model::{FileId, IndexedType, TypeId};
-use crate::ast::item::{ExportDecl, ImportDecl, ImportKind, TypeRef};
+use crate::ast::item::{ExportDecl, ExportOrigin, ImportDecl, ImportKind, TypeRef};
 use crate::ast::{FileAst, ModulePath, QualifiedPath};
 use std::collections::{BTreeMap, HashMap};
 
@@ -35,7 +35,7 @@ impl<'a> TypeResolver<'a> {
                     .or_insert(ty.id);
             } else {
                 types_by_mod_name.insert((&ty.module_path, ty.decl.name.as_str()), ty.id);
-                if ty.decl.is_default_export {
+                if ty.decl.export_binding.is_default() {
                     default_type_by_module.insert(&ty.module_path, ty.id);
                 }
                 single_non_test_by_mod
@@ -85,7 +85,11 @@ impl<'a> TypeResolver<'a> {
                 exports_by_module
                     .entry(&file.module_path)
                     .or_default()
-                    .extend(file.exports.iter());
+                    .extend(
+                        file.exports
+                            .iter()
+                            .filter(|e| e.origin != ExportOrigin::DirectExternal),
+                    );
             }
             if !file.imports.is_empty() {
                 let mod_imports = imports_by_module.entry(&file.module_path).or_default();

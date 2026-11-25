@@ -1,4 +1,5 @@
 use crate::ast::item::{
+    ExportBinding,
     CallKind, CallReceiver, CallSite, ConditionalGuard, FieldAccess, FieldInit, FunctionCouplingFacts,
     FunctionDecl, FunctionRole, LocalBinding, ParamAccess, ParamDecl, TypeRef, Visibility,
 };
@@ -33,7 +34,8 @@ pub(crate) struct FunctionHeader {
     pub(crate) self_receiver: Option<ParamAccess>,
     pub(crate) visibility: Visibility,
     pub(crate) explicit_visibility: bool,
-    pub(crate) is_default_export: bool,
+    pub(crate) export_binding: ExportBinding,
+    pub(crate) is_lifecycle: bool,
     pub(crate) role: FunctionRole,
     pub(crate) params: Vec<ParamDecl>,
     pub(crate) return_type: Option<TypeRef>,
@@ -62,7 +64,8 @@ impl ExtractedBody {
             self_receiver: header.self_receiver,
             visibility: header.visibility,
             explicit_visibility: header.explicit_visibility,
-            is_default_export: header.is_default_export,
+            export_binding: header.export_binding,
+            is_lifecycle: header.is_lifecycle,
             role: header.role,
             conditional_guard: ConditionalGuard::None,
             params: header.params,

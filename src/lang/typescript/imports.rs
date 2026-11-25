@@ -1,8 +1,8 @@
 use super::TsNode;
 use super::coupling;
 use super::syntax;
-use crate::ast::item::{ExportDecl, ImportDecl, ImportKind, ImportOrigin, Visibility};
-use crate::ast::{ModulePath, SyntaxTree};
+use crate::ast::item::{ExportDecl, ExportOrigin, ImportDecl, ImportKind, ImportOrigin, Visibility};
+use crate::ast::{BarrelKind, ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
 
 pub(super) struct ImportBatch {
@@ -124,22 +124,24 @@ impl<'a> ModuleImportParser<'a> {
     }
 
     pub(super) fn parse_reexport(&self, node: &TsNode<'_>) -> Option<ExportClauseResult> {
+        let span = self.tree.node_span(node);
         let source_field = node.field("source");
         let has_source = source_field.is_some();
         let source_module = source_field.and_then(|s| {
             let spec = syntax::unquote_string(&s.text());
             syntax::resolve_relative_module_path(self.base_dir, &spec)
         });
+        let source_origin = if !has_source {
+            ExportOrigin::Local
+        } else if source_module.is_some() {
+            ExportOrigin::DirectInternal
+        } else {
+            ExportOrigin::DirectExternal
+        };
 
         if let Some(clause) = node.children().find(|c| c.kind() == "export_clause") {
             let mut exports = Vec::new();
             let mut local_exported = Vec::new();
-            if has_source && source_module.is_none() {
-                return Some(ExportClauseResult {
-                    exports,
-                    local_exported,
-                });
-            }
             for spec in clause.children() {
                 if spec.kind() != "export_specifier" {
                     continue;
@@ -162,6 +164,8 @@ impl<'a> ModuleImportParser<'a> {
                     is_default,
                     is_wildcard: false,
                     visibility: Visibility::Public,
+                    origin: source_origin,
+                    span: span.clone(),
                 });
             }
             return Some(ExportClauseResult {
@@ -176,16 +180,16 @@ impl<'a> ModuleImportParser<'a> {
                 .find(TsNode::is_named)
                 .map(|n| syntax::unquote_string(&n.text()))
                 .unwrap_or_default();
-            let exports = if let Some(src_mod) = source_module
-                && !exported_name.is_empty()
-            {
+            let exports = if has_source && !exported_name.is_empty() {
                 vec![ExportDecl {
-                    source_module: Some(src_mod),
+                    source_module,
                     symbol: String::new(),
                     exported_name,
                     is_default: false,
                     is_wildcard: true,
                     visibility: Visibility::Public,
+                    origin: source_origin,
+                    span,
                 }]
             } else {
                 Vec::new()
@@ -197,18 +201,17 @@ impl<'a> ModuleImportParser<'a> {
         }
 
         if has_source && syntax::has_modifier_token(node, "*") {
-            let exports = source_module.map_or_else(Vec::new, |src_mod| {
-                vec![ExportDecl {
-                    source_module: Some(src_mod),
+            return Some(ExportClauseResult {
+                exports: vec![ExportDecl {
+                    source_module,
                     symbol: String::new(),
                     exported_name: String::new(),
                     is_default: false,
                     is_wildcard: true,
                     visibility: Visibility::Public,
-                }]
-            });
-            return Some(ExportClauseResult {
-                exports,
+                    origin: source_origin,
+                    span,
+                }],
                 local_exported: Vec::new(),
             });
         }
@@ -217,27 +220,71 @@ impl<'a> ModuleImportParser<'a> {
     }
 }
 
-pub(super) fn is_index_barrel(
-    rel_path: &std::path::Path,
+pub(super) fn classify_barrel_kind(
+    tree: &SyntaxTree,
     imports: &[ImportDecl],
     exports: &[ExportDecl],
-) -> bool {
-    let is_index = rel_path
+    index_stem: &str,
+    ambient_suffix: &str,
+) -> BarrelKind {
+    let rel_path = tree.relative_path();
+    if rel_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(ambient_suffix))
+        || !exports.iter().any(ExportDecl::is_reexport)
+    {
+        return BarrelKind::None;
+    }
+    if rel_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .is_some_and(|s| s == "index");
-    if !is_index {
-        return false;
-    }
-    if exports.iter().any(|exp| exp.source_module.is_some()) {
-        return true;
+        .is_some_and(|s| s == index_stem)
+    {
+        return BarrelKind::DirectoryIndex;
     }
     let imported_locals: std::collections::HashSet<&str> = imports
         .iter()
-        .filter(|imp| !imp.in_test_module && imp.resolved_module.is_some())
+        .filter(|imp| !imp.in_test_module)
         .map(ImportDecl::local_name)
         .collect();
-    exports
-        .iter()
-        .any(|exp| !exp.symbol.is_empty() && imported_locals.contains(exp.symbol.as_str()))
+    for child in tree.root().children() {
+        if !child.is_named() || child.kind() == "comment" || child.kind() == "import_statement" {
+            continue;
+        }
+        if child.kind() != "export_statement" || child.field("declaration").is_some() {
+            return BarrelKind::None;
+        }
+        if child.field("source").is_some() {
+            continue;
+        }
+        if let Some(clause) = child.children().find(|c| c.kind() == "export_clause") {
+            let mut count = 0usize;
+            for spec in clause.children() {
+                if spec.kind() != "export_specifier" {
+                    continue;
+                }
+                let Some(name_node) = spec.field("name") else {
+                    return BarrelKind::None;
+                };
+                if !imported_locals.contains(syntax::unquote_string(&name_node.text()).as_str()) {
+                    return BarrelKind::None;
+                }
+                count += 1;
+            }
+            if count == 0 {
+                return BarrelKind::None;
+            }
+            continue;
+        }
+        let is_imported_default = child.field("value").is_some_and(|val| {
+            syntax::has_modifier_token(&child, "default")
+                && val.kind() == "identifier"
+                && imported_locals.contains(val.text().as_ref())
+        });
+        if !is_imported_default {
+            return BarrelKind::None;
+        }
+    }
+    BarrelKind::PureReexport
 }

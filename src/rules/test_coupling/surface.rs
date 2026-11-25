@@ -81,7 +81,7 @@ impl<'a> SurfaceChecker<'a> {
                             &file.module_path,
                             &target.module_path,
                             &target.decl.name,
-                            target.decl.is_default_export,
+                            target.decl.export_binding.is_default(),
                         )
                         && self
                             .reported_barrel_import_funcs
@@ -111,7 +111,7 @@ impl<'a> SurfaceChecker<'a> {
                             &file.module_path,
                             &ty.module_path,
                             &ty.decl.name,
-                            ty.decl.is_default_export,
+                            ty.decl.export_binding.is_default(),
                         )
                         && self.reported_barrel_import_types.insert((file_id, ty.id))
                     {
@@ -313,7 +313,7 @@ impl<'a> SurfaceChecker<'a> {
         for func in codebase.functions() {
             if self.index.is_test_func(func)
                 || func.decl.is_interface_impl
-                || func.decl.is_entrypoint()
+                || func.decl.role.is_entrypoint()
                 || self.reachability.flagged_funcs.contains(&func.id)
                 || func.decl.visibility != Visibility::Internal
                 || !func.decl.explicit_visibility

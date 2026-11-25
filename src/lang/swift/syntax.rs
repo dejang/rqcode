@@ -1,6 +1,6 @@
 use super::SwiftNode;
 use crate::ast::item::{
-    ExportDecl, ImportDecl, ImportKind, ParamAccess, ParamDecl, TypeRef, Visibility,
+    ExportDecl, ExportOrigin, ImportDecl, ImportKind, ParamAccess, ParamDecl, TypeRef, Visibility,
 };
 use crate::ast::{ModulePath, SyntaxTree};
 use crate::lang::common;
@@ -489,6 +489,8 @@ pub(super) fn parse_import_declaration(
             is_default: false,
             is_wildcard: false,
             visibility: Visibility::Public,
+            origin: ExportOrigin::DirectInternal,
+            span: span.clone(),
         });
         let origin = super::coupling::classify_import_origin(
             segments.first().map_or("", String::as_str),
@@ -517,6 +519,8 @@ pub(super) fn parse_import_declaration(
         is_default: false,
         is_wildcard: true,
         visibility: Visibility::Public,
+        origin: ExportOrigin::DirectInternal,
+        span: span.clone(),
     });
     let origin = super::coupling::classify_import_origin(
         segments.first().map_or("", String::as_str),

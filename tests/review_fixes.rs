@@ -1,10 +1,10 @@
 use rqcode::ast::codebase::Codebase;
 use rqcode::ast::item::{
-    ConditionalGuard, FieldDecl, FieldInit, FunctionCouplingFacts, FunctionDecl, FunctionRole,
+    ConditionalGuard, ExportBinding, ExportOrigin, FieldDecl, FieldInit, FunctionCouplingFacts, FunctionDecl, FunctionRole,
     SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
 };
 use rqcode::ast::similarity::NormalizedTree;
-use rqcode::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
+use rqcode::ast::{BarrelKind, FileAst, FileRole, ModulePath, SyntaxTree};
 use rqcode::config::Config;
 use rqcode::diagnostic::Span;
 use rqcode::lang::LanguageFrontend;
@@ -39,7 +39,7 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
         language: ts_spec.id(),
         member_separator: ts_spec.member_separator(),
         role: FileRole::Module,
-            is_barrel: false,
+            barrel_kind: BarrelKind::None,
             module_decls: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
@@ -48,8 +48,9 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
             kind: TypeKind::Class,
             visibility: Visibility::Public,
             in_test_module: false,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers: false,
+            is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed,
             base_types: Vec::new(),
             fields: vec![FieldDecl {
@@ -73,7 +74,8 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
             self_receiver: None,
             visibility: Visibility::Private,
             explicit_visibility: false,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
+            is_lifecycle: false,
             role: FunctionRole::Test,
             conditional_guard: ConditionalGuard::None,
             params: Vec::new(),
@@ -259,8 +261,13 @@ export * from 'third-party-pkg';
 ",
     );
     assert_eq!(f1.types[0].visibility, Visibility::Private);
-    assert!(!f1.types[0].is_default_export);
-    assert_eq!(f1.exports, Vec::new());
+    assert!(!f1.types[0].export_binding.is_default());
+    assert_eq!(f1.exports.len(), 5);
+    assert!(
+        f1.exports
+            .iter()
+            .all(|e| e.origin == ExportOrigin::DirectExternal && e.source_module.is_none())
+    );
 
     let (t2, f2) = parse_ts(
         "src/consumer.ts",
@@ -303,7 +310,7 @@ context.use("auth", () => { verify(); });
 "#,
     );
     assert!(
-        prod_ast.functions.iter().all(|f| !f.is_test_code()),
+        prod_ast.functions.iter().all(|f| !f.role.is_test_code()),
         "production calls on test/context must not be classified as tests: {:?}",
         prod_ast.functions
     );
@@ -324,7 +331,7 @@ describe.each([1, 2])("suite %s", () => {
     let test_names: Vec<&str> = test_ast
         .functions
         .iter()
-        .filter(|f| f.is_test())
+        .filter(|f| f.role.is_test())
         .map(|f| f.name.as_str())
         .collect();
     assert_eq!(

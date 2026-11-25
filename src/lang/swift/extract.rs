@@ -1,10 +1,10 @@
 use super::members::{MemberContext, SwiftTypeIndex, qualify_name, subscript_body_node};
 use super::{SwiftConventions, SwiftNode, coupling, expr, syntax};
 use crate::ast::item::{
-    ConditionalGuard, ExportDecl, FieldDecl, FunctionDecl, ImportDecl, InterfaceImpl,
+    ConditionalGuard, ExportBinding, ExportDecl, FieldDecl, FunctionDecl, ImportDecl, InterfaceImpl,
     SubclassPolicy, TypeDecl, TypeKind, Visibility,
 };
-use crate::ast::{FileAst, FileRole, ModulePath, SyntaxTree};
+use crate::ast::{BarrelKind, FileAst, FileRole, ModulePath, SyntaxTree};
 
 #[derive(Clone, Copy)]
 struct TypeDeclCtx<'b> {
@@ -93,7 +93,7 @@ impl<'a> SwiftExtractor<'a> {
             language: self.tree.language_id(),
             member_separator: self.tree.language().member_separator(),
             role: self.file_role,
-            is_barrel: false,
+            barrel_kind: BarrelKind::None,
             module_decls: Vec::new(),
             imports: self.out.imports,
             exports: self.out.exports,
@@ -235,8 +235,9 @@ impl<'a> SwiftExtractor<'a> {
             kind,
             visibility,
             in_test_module: decl.in_test_context,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers,
+            is_immutable_record: false,
             subclass_policy,
             base_types,
             fields,
@@ -521,8 +522,9 @@ impl<'a> SwiftExtractor<'a> {
             kind: TypeKind::Interface,
             visibility,
             in_test_module: decl.in_test_context,
-            is_default_export: false,
+            export_binding: ExportBinding::Standard,
             has_implicit_field_readers: false,
+            is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed,
             base_types,
             fields,

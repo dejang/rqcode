@@ -1,6 +1,6 @@
 use super::model::{FileId, IndexedFunc, IndexedType, TypeId};
 use super::surface::{BarrelBoundary, EffectiveVisibility, PublicSurface, SurfaceData};
-use crate::ast::item::{ImportKind, Visibility};
+use crate::ast::item::{ExportOrigin, ImportDecl, ImportKind, Visibility};
 use crate::ast::{FileAst, FileRole, LanguageId, ModulePath};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -70,7 +70,7 @@ impl ExpansionState {
 
     fn expand_file_exports(&mut self, file: &FileAst, requested_sym: Option<&str>) {
         for exp in &file.exports {
-            if exp.visibility != Visibility::Public {
+            if exp.visibility != Visibility::Public || exp.origin == ExportOrigin::DirectExternal {
                 continue;
             }
             if let Some(req) = requested_sym {
@@ -217,7 +217,7 @@ impl<'a> SurfaceBuilder<'a> {
         let mut candidates: HashSet<LanguageId> = self.lib_root_languages.clone();
         let barrel_mods: HashSet<&ModulePath> = barrels.iter().map(BarrelBoundary::barrel_module).collect();
         for file in self.files {
-            if !file.is_test_file() && file.is_barrel && barrel_mods.contains(&file.module_path) {
+            if !file.is_test_file() && file.is_directory_barrel() && barrel_mods.contains(&file.module_path) {
                 candidates.insert(file.language);
             }
         }
@@ -231,7 +231,7 @@ impl<'a> SurfaceBuilder<'a> {
             }
         }
         for func in self.functions {
-            if !func.decl.is_test_code()
+            if !func.decl.role.is_test_code()
                 && !self.files[func.file_id.0].is_test_file()
                 && !self.binary_entry_files.contains(&func.file_id)
                 && func.decl.visibility == Visibility::Public
@@ -376,8 +376,28 @@ impl<'a> SurfaceBuilder<'a> {
 
     fn compute_barrel_boundaries(&self) -> Vec<BarrelBoundary> {
         let mut barrels = Vec::new();
+        let mut internal_imported: HashSet<&str> = HashSet::new();
         for file in self.files {
-            if file.is_test_file() || !file.is_barrel {
+            if file.is_test_file() || !file.is_directory_barrel() {
+                continue;
+            }
+            internal_imported.clear();
+            for imp in &file.imports {
+                if !imp.in_test_module && imp.resolved_module.is_some() {
+                    internal_imported.insert(ImportDecl::local_name(imp));
+                }
+            }
+            let mut has_internal_reexport = false;
+            for exp in &file.exports {
+                let is_direct = exp.origin == ExportOrigin::DirectInternal && exp.source_module.is_some();
+                let is_bound = exp.origin == ExportOrigin::ImportedBinding
+                    && internal_imported.contains(exp.symbol.as_str());
+                if is_direct || is_bound {
+                    has_internal_reexport = true;
+                    break;
+                }
+            }
+            if !has_internal_reexport {
                 continue;
             }
             let closure = self.collect_barrel_reexports(&file.module_path);
@@ -423,7 +443,7 @@ impl<'a> SurfaceBuilder<'a> {
     fn compute_reachable_public_types(&self, surface: &PublicSurface) -> HashSet<TypeId> {
         let mut methods_by_owner: HashMap<TypeId, Vec<&IndexedFunc>> = HashMap::new();
         for func in self.functions {
-            if func.decl.is_test_code() || self.files[func.file_id.0].is_test_file() {
+            if func.decl.role.is_test_code() || self.files[func.file_id.0].is_test_file() {
                 continue;
             }
             if let Some(owner_id) = func.resolved_owner
@@ -443,7 +463,7 @@ impl<'a> SurfaceBuilder<'a> {
             }
         }
         for func in self.functions {
-            if func.decl.is_test_code() || self.files[func.file_id.0].is_test_file() {
+            if func.decl.role.is_test_code() || self.files[func.file_id.0].is_test_file() {
                 continue;
             }
             if surface.effective_func_visibility(func, self.types) == EffectiveVisibility::Public {

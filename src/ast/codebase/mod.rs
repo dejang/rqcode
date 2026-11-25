@@ -74,8 +74,8 @@ impl Codebase {
             let is_test_file = file.is_test_file();
             for decl in &file.functions {
                 let id = FuncId(functions.len());
-                if !is_test_file && !decl.is_test_code() {
-                    if decl.is_entrypoint() {
+                if !is_test_file && !decl.role.is_test_code() {
+                    if decl.role.is_entrypoint() {
                         has_binary_entry = true;
                     }
                     if decl.is_free_function() {
@@ -233,8 +233,13 @@ impl Codebase {
     #[must_use]
     pub fn external_free_functions_for(&self, type_id: TypeId) -> Vec<ExternalFuncUsage<'_>> {
         let ty = &self.types[type_id.0];
+        let declared_fields: HashSet<&str> = ty
+            .decl
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         let mut usages = Vec::new();
-        let mut param_names: HashSet<&str> = HashSet::new();
         let mut other_project_types: HashSet<TypeId> = HashSet::new();
         let mut reads_seen: HashSet<&str> = HashSet::new();
         let mut writes_seen: HashSet<&str> = HashSet::new();
@@ -243,21 +248,21 @@ impl Codebase {
 
         for func in &self.functions {
             if !func.decl.is_free_function()
-                || func.decl.is_test_code()
+                || func.decl.role.is_test_code()
                 || self.files[func.file_id.0].is_test_file()
                 || func.module_path == ty.module_path
             {
                 continue;
             }
 
-            param_names.clear();
             other_project_types.clear();
+            let mut has_target_param = false;
             let mut takes_mut_ref = false;
 
             for param in &func.resolved_params {
                 match param.resolved_type {
                     Some(tid) if tid == type_id => {
-                        param_names.insert(param.decl.name.as_str());
+                        has_target_param = true;
                         if param.decl.access == ParamAccess::MutableRef {
                             takes_mut_ref = true;
                         }
@@ -269,16 +274,24 @@ impl Codebase {
                 }
             }
 
-            if param_names.is_empty() {
-                continue;
-            }
-
             reads_seen.clear();
             writes_seen.clear();
             reads.clear();
             writes.clear();
-            for access in &func.decl.field_accesses {
-                if !param_names.contains(access.receiver_param.as_str()) {
+            for (access, &resolved) in func
+                .decl
+                .field_accesses
+                .iter()
+                .zip(&func.resolved_field_accesses)
+            {
+                let Some(tid) = resolved else {
+                    continue;
+                };
+                if tid != type_id {
+                    other_project_types.insert(tid);
+                    continue;
+                }
+                if !declared_fields.contains(access.field_name.as_str()) {
                     continue;
                 }
                 if access.is_write {
@@ -290,12 +303,16 @@ impl Codebase {
                 }
             }
 
+            if !has_target_param && reads.is_empty() && writes.is_empty() {
+                continue;
+            }
+
             usages.push(ExternalFuncUsage {
                 func,
                 takes_mut_ref,
                 direct_field_reads: std::mem::take(&mut reads),
                 direct_field_writes: std::mem::take(&mut writes),
-                other_project_type_params: other_project_types.len(),
+                other_project_types: other_project_types.len(),
             });
         }
 
@@ -311,7 +328,7 @@ impl Codebase {
         let mut integration_tests = Vec::new();
 
         for func in &self.functions {
-            if !func.decl.is_test() {
+            if !func.decl.role.is_test() {
                 continue;
             }
 
@@ -367,7 +384,7 @@ impl Codebase {
         }
         self.functions.iter().any(|f| {
             f.file_id == file_id
-                && f.decl.is_test_code()
+                && f.decl.role.is_test_code()
                 && line >= f.decl.span.start_line()
                 && line <= f.decl.span.end_line()
         })
@@ -395,7 +412,7 @@ mod tests {
     use super::*;
     use crate::ast::ModulePath;
     use crate::ast::item::{
-        CallKind, CallReceiver, CallSite, ConditionalGuard, FieldAccess, FieldDecl,
+        CallKind, CallReceiver, CallSite, ConditionalGuard, ExportBinding, FieldAccess, FieldDecl,
         FunctionCouplingFacts, FunctionDecl, FunctionRole, ImportDecl, ImportKind, ImportOrigin,
         ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
     };
@@ -411,91 +428,59 @@ mod tests {
     ) -> (SyntaxTree, FileAst) {
         let rust = rust_language_spec();
         let tree = SyntaxTree::parse(rel, rel, rust.clone(), "");
-        let role = if rel.starts_with("tests/") {
-            FileRole::IntegrationTest
-        } else {
-            FileRole::Module
-        };
         let ast = FileAst {
-            path: rel.into(),
-            relative_path: rel.into(),
+            path: rel.into(), relative_path: rel.into(),
             module_path: ModulePath::new(module.iter().map(|s| (*s).to_string()).collect()),
-            language: rust.id(),
-            member_separator: rust.member_separator(),
-            role,
-            is_barrel: false,
-            module_decls: Vec::new(),
-            imports,
-            exports: Vec::new(),
-            types,
-            interface_impls: Vec::new(),
-            functions,
-            top_level_idents: Vec::new(),
-            test_hooks: Vec::new(),
-            module_mocks: Vec::new(),
-            suppressions: Vec::new(),
+            language: rust.id(), member_separator: rust.member_separator(),
+            role: FileRole::Module, barrel_kind: crate::ast::BarrelKind::None,
+            module_decls: Vec::new(), imports, exports: Vec::new(), types,
+            interface_impls: Vec::new(), functions, top_level_idents: Vec::new(),
+            test_hooks: Vec::new(), module_mocks: Vec::new(), suppressions: Vec::new(),
         };
         (tree, ast)
+    }
+
+    fn stub_fn(name: &str, owner: Option<&str>, role: FunctionRole, span: Span) -> FunctionDecl {
+        FunctionDecl {
+            name: name.to_string(), owner_type: owner.map(str::to_string),
+            is_interface_impl: false, interface_name: None, self_receiver: None,
+            visibility: Visibility::Private, explicit_visibility: false,
+            export_binding: ExportBinding::Standard, is_lifecycle: false, role,
+            conditional_guard: ConditionalGuard::None, params: Vec::new(), return_type: None,
+            body_tree: NormalizedTree::default(), field_accesses: Vec::new(), calls: Vec::new(),
+            constructed_types: Vec::new(), local_bindings: Vec::new(), field_inits: Vec::new(),
+            referenced_idents: Vec::new(), scoped_ident_refs: Vec::new(),
+            coupling: FunctionCouplingFacts::default(), span,
+        }
     }
 
     #[test]
     fn resolves_external_free_functions_and_field_mutations_across_modules() {
         let order_type = TypeDecl {
             name: "Order".into(), kind: TypeKind::Struct, visibility: Visibility::Public,
-            in_test_module: false, is_default_export: false, has_implicit_field_readers: false,
+            in_test_module: false, export_binding: ExportBinding::Standard,
+            has_implicit_field_readers: false, is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed, base_types: Vec::new(),
             fields: vec![FieldDecl {
                 name: "total".into(), type_name: Some(TypeRef::Named("u64".into())),
                 visibility: Visibility::Public, explicit_visibility: false, is_mut_ref: false,
-                conditional_guard: ConditionalGuard::None, span: Span::new("src/order.rs", 2, 5, 2, 19),
+                conditional_guard: ConditionalGuard::None,
+                span: Span::new("src/order.rs", 2, 5, 2, 20),
             }],
             annotations: Vec::new(), span: Span::new("src/order.rs", 1, 1, 3, 2),
         };
+        let mut helper = stub_fn("apply_discount", None, FunctionRole::Production, Span::new("src/pricing.rs", 4, 1, 6, 2));
+        helper.visibility = Visibility::Public;
+        helper.params.push(ParamDecl {
+            name: "order".into(), type_name: Some(TypeRef::Named("Ord".into())),
+            access: ParamAccess::MutableRef,
+        });
+        helper.field_accesses.push(FieldAccess {
+            receiver_param: "order".into(), receiver_type: None, receiver_is_self: false, field_name: "total".into(),
+            is_write: true, is_read: false, span: Span::new("src/pricing.rs", 5, 5, 5, 20),
+        });
 
-        let helper = FunctionDecl {
-            name: "apply_discount".to_string(),
-            owner_type: None,
-            is_interface_impl: false,
-            interface_name: None,
-            self_receiver: None,
-            visibility: Visibility::Public,
-            explicit_visibility: false,
-            is_default_export: false,
-            role: FunctionRole::Production,
-            conditional_guard: ConditionalGuard::None,
-            params: vec![ParamDecl {
-                name: "order".to_string(),
-                type_name: Some(TypeRef::Named("Ord".to_string())),
-                access: ParamAccess::MutableRef,
-            }],
-            return_type: None,
-            body_tree: NormalizedTree::default(),
-            field_accesses: vec![FieldAccess {
-                receiver_param: "order".to_string(),
-                receiver_is_self: false,
-                receiver_type: None,
-                field_name: "total".to_string(),
-                is_read: false,
-                is_write: true,
-                span: Span::new("src/pricing.rs", 5, 5, 5, 20),
-            }],
-            calls: Vec::new(),
-            constructed_types: Vec::new(),
-            local_bindings: Vec::new(),
-            field_inits: Vec::new(),
-            referenced_idents: Vec::new(),
-            scoped_ident_refs: Vec::new(),
-            coupling: FunctionCouplingFacts::default(),
-            span: Span::new("src/pricing.rs", 4, 1, 6, 2),
-        };
-
-        let (t1, f1) = make_file(
-            "src/order.rs",
-            &["crate", "order"],
-            vec![order_type],
-            vec![],
-            vec![],
-        );
+        let (t1, f1) = make_file("src/order.rs", &["crate", "order"], vec![order_type], vec![], vec![]);
         let (t2, f2) = make_file(
             "src/pricing.rs",
             &["crate", "pricing"],
@@ -504,20 +489,14 @@ mod tests {
             vec![ImportDecl {
                 resolved_module: Some(ModulePath::new(vec!["crate".into(), "order".into()])),
                 module_segments: vec!["crate".into(), "order".into()],
-                kind: ImportKind::Named,
-                symbol: "Order".into(),
-                alias: Some("Ord".into()),
-                in_test_module: false,
-                bypasses_visibility: false,
-                origin: ImportOrigin::Project,
+                kind: ImportKind::Named, symbol: "Order".into(), alias: Some("Ord".into()),
+                in_test_module: false, bypasses_visibility: false, origin: ImportOrigin::Project,
                 span: Span::new("src/pricing.rs", 1, 1, 1, 35),
             }],
         );
 
         let codebase = Codebase::build(vec![t1, t2], vec![f1, f2]);
-        let order_id = codebase.types()[0].id;
-        let usages = codebase.external_free_functions_for(order_id);
-
+        let usages = codebase.external_free_functions_for(codebase.types()[0].id);
         assert_eq!(usages.len(), 1);
         assert!(usages[0].takes_mut_ref);
         assert!(usages[0].mutates_fields());
@@ -528,62 +507,23 @@ mod tests {
     fn tests_for_does_not_conflate_same_named_methods_across_unrelated_types() {
         let ty_a = TypeDecl {
             name: "Alpha".into(), kind: TypeKind::Struct, visibility: Visibility::Private,
-            in_test_module: false, is_default_export: false, has_implicit_field_readers: false,
+            in_test_module: false, export_binding: ExportBinding::Standard,
+            has_implicit_field_readers: false, is_immutable_record: false,
             subclass_policy: SubclassPolicy::Closed, base_types: Vec::new(),
             fields: vec![], annotations: vec![], span: Span::new("src/a.rs", 1, 1, 1, 15),
-        };
-        let stub_fn = |name: &str, owner: Option<&str>, role: FunctionRole, span: Span| FunctionDecl {
-            name: name.to_string(),
-            owner_type: owner.map(str::to_string),
-            is_interface_impl: false,
-            interface_name: None,
-            self_receiver: None,
-            visibility: Visibility::Private,
-            explicit_visibility: false,
-            is_default_export: false,
-            role,
-            conditional_guard: ConditionalGuard::None,
-            params: vec![],
-            return_type: None,
-            body_tree: NormalizedTree::default(),
-            field_accesses: vec![],
-            calls: vec![],
-            constructed_types: vec![],
-            local_bindings: vec![],
-            field_inits: vec![],
-            referenced_idents: vec![],
-            scoped_ident_refs: vec![],
-            coupling: FunctionCouplingFacts::default(),
-            span,
         };
         let alpha_new = stub_fn("new", Some("Alpha"), FunctionRole::Production, Span::new("src/a.rs", 2, 1, 2, 15));
         let mut unrelated_test = stub_fn("tests_beta", None, FunctionRole::Test, Span::new("src/b.rs", 4, 1, 6, 2));
         unrelated_test.calls.push(CallSite {
-            kind: CallKind::Scoped,
-            callee: "new".to_string(),
+            kind: CallKind::Scoped, callee: "new".to_string(),
             receiver: Some(CallReceiver::Named("Beta".to_string())),
-            arg_receivers: Vec::new(),
-            span: Span::new("src/b.rs", 5, 5, 5, 16),
+            arg_receivers: Vec::new(), span: Span::new("src/b.rs", 5, 5, 5, 16),
         });
         unrelated_test.constructed_types.push(TypeRef::Named("Beta".to_string()));
 
-        let (t1, f1) = make_file(
-            "src/a.rs",
-            &["crate", "a"],
-            vec![ty_a],
-            vec![alpha_new],
-            vec![],
-        );
-        let (t2, f2) = make_file(
-            "src/b.rs",
-            &["crate", "b"],
-            vec![],
-            vec![unrelated_test],
-            vec![],
-        );
-
+        let (t1, f1) = make_file("src/a.rs", &["crate", "a"], vec![ty_a], vec![alpha_new], vec![]);
+        let (t2, f2) = make_file("src/b.rs", &["crate", "b"], vec![], vec![unrelated_test], vec![]);
         let codebase = Codebase::build(vec![t1, t2], vec![f1, f2]);
-        let profile = codebase.tests_for(codebase.types()[0].id);
-        assert!(profile.scattered_unit_tests.is_empty());
+        assert!(codebase.tests_for(codebase.types()[0].id).scattered_unit_tests.is_empty());
     }
 }
