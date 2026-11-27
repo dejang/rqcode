@@ -1,6 +1,6 @@
+use rqcode::Analyzer;
 use rqcode::config::Config;
 use rqcode::diagnostic::Diagnostic;
-use rqcode::Analyzer;
 use rqcode::report::Report;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -127,7 +127,10 @@ impl ExpectedDiagnostic {
 }
 
 impl FixtureCase {
-    fn discover_all(fixtures_root: &Path) -> Result<Vec<Self>, Box<dyn Error>> {
+    fn discover_all(
+        fixtures_root: &Path,
+        skip_subdir: Option<&str>,
+    ) -> Result<Vec<Self>, Box<dyn Error>> {
         let mut stack = vec![fixtures_root.to_path_buf()];
         let mut dirs = Vec::new();
 
@@ -140,6 +143,12 @@ impl FixtureCase {
             for entry in std::fs::read_dir(&dir)? {
                 let path = entry?.path();
                 if path.is_dir() {
+                    if let Some(skip) = skip_subdir
+                        && dir == fixtures_root
+                        && path.file_name().and_then(|n| n.to_str()) == Some(skip)
+                    {
+                        continue;
+                    }
                     stack.push(path);
                 }
             }
@@ -246,17 +255,8 @@ fn normalize_rel_path(path: &Path, root: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
-#[test]
-fn multi_file_fixtures_match_expectations() -> Result<(), Box<dyn Error>> {
-    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures");
-    let cases = FixtureCase::discover_all(&fixtures_root)?;
-    assert!(
-        !cases.is_empty(),
-        "no fixture cases discovered under {}",
-        fixtures_root.display()
-    );
+fn run_fixture_cases(cases: &[FixtureCase], label: &str) -> Result<(), Box<dyn Error>> {
+    assert!(!cases.is_empty(), "no fixture cases discovered for {label}");
 
     let mut scratch = DiagnosticScratch {
         used_indices: HashSet::new(),
@@ -264,16 +264,35 @@ fn multi_file_fixtures_match_expectations() -> Result<(), Box<dyn Error>> {
         actual_related_files: HashSet::new(),
         errors: Vec::new(),
     };
-    for case in &cases {
+    for case in cases {
         case.run(&mut scratch)?;
     }
 
     assert!(
         scratch.errors.is_empty(),
-        "{} of {} fixture(s) failed:\n\n{}",
+        "{} of {} {label} fixture(s) failed:\n\n{}",
         scratch.errors.len(),
         cases.len(),
         scratch.errors.join("\n")
     );
     Ok(())
+}
+
+#[test]
+fn multi_file_fixtures_match_expectations() -> Result<(), Box<dyn Error>> {
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    let cases = FixtureCase::discover_all(&fixtures_root, Some("react"))?;
+    run_fixture_cases(&cases, "core")
+}
+
+#[test]
+fn react_fixtures_match_expectations() -> Result<(), Box<dyn Error>> {
+    let react_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("react");
+    let cases = FixtureCase::discover_all(&react_root, None)?;
+    run_fixture_cases(&cases, "react")
 }

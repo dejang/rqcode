@@ -1,0 +1,35 @@
+rules = ["test-coupling"]
+exact = true
+
+[[diagnostics]]
+rule = "test-calls-private-api"
+file = "src/components/VaultPanel.test.tsx"
+message_contains = "VaultService.rawSecret"
+related_files = ["src/models/vault.ts"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/components/DebugVaultPanel.tsx"
+message_contains = "DebugVaultPanel"
+related_files = ["src/components/VaultPanel.test.tsx"]
+
+[[diagnostics]]
+rule = "test-only-production-api"
+file = "src/components/UnusedBanner.tsx"
+message_contains = "UnusedBanner"
+related_files = ["src/components/VaultPanel.test.tsx"]
+
+[[diagnostics]]
+rule = "test-mocks-internal-collaborator"
+file = "src/components/OrderListRows.test.tsx"
+message_contains = "ChildRow"
+related_files = ["src/components/ChildRow.tsx"]
+
+[[diagnostics]]
+rule = "interaction-only-test"
+file = "src/components/OrderListRows.test.tsx"
+message_contains = "renders child row"
+
+[[diagnostics]]
+rule = "production-test-hook"
+file = "src/components/VaultPanel.tsx"

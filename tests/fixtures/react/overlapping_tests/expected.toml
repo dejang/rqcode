@@ -1,0 +1,8 @@
+rules = ["similarity"]
+exact = true
+
+[[diagnostics]]
+rule = "overlapping-tests"
+file = "src/components/CartPanel.test.tsx"
+message_contains = "CartPanel"
+related_files = ["src/components/CartPanel.test.tsx"]

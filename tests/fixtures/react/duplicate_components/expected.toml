@@ -1,0 +1,14 @@
+rules = ["similarity"]
+exact = true
+
+[[diagnostics]]
+rule = "duplicate-function"
+file = "src/components/PriceBadge.tsx"
+message_contains = "computeDiscountedCost"
+related_files = ["src/utils/formatters.ts"]
+
+[[diagnostics]]
+rule = "duplicate-function"
+file = "src/components/RetailSummaryCard.tsx"
+message_contains = "WholesaleSummaryCard"
+related_files = ["src/components/WholesaleSummaryCard.tsx"]

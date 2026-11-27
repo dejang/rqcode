@@ -1,0 +1,13 @@
+rules = ["cohesion"]
+exact = true
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/components/CheckoutPanel.tsx"
+message_contains = "Order"
+related_files = ["src/models/order.ts"]
+
+[[diagnostics]]
+rule = "no-barrel-module"
+file = "src/components/index.ts"
+message_contains = "barrel"

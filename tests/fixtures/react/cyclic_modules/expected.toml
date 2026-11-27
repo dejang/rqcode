@@ -1,0 +1,7 @@
+rules = ["cohesion"]
+exact = true
+
+[[diagnostics]]
+rule = "cyclic-module-dependency"
+file = "src/AlphaHelper.ts"
+related_files = ["src/BetaCard.tsx"]

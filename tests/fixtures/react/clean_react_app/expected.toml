@@ -1,0 +1,3 @@
+rules = ["cohesion", "test-coupling", "similarity"]
+exact = true
+diagnostics = []

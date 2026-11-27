@@ -1,0 +1,17 @@
+rules = ["cohesion"]
+exact = true
+
+[[diagnostics]]
+rule = "scattered-concept"
+file = "src/models/order.ts"
+related_files = ["src/components/PricingPanel.tsx", "src/components/ShippingPanel.tsx"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/components/PricingPanel.tsx"
+related_files = ["src/models/order.ts"]
+
+[[diagnostics]]
+rule = "external-field-mutation"
+file = "src/components/ShippingPanel.tsx"
+related_files = ["src/models/order.ts"]
