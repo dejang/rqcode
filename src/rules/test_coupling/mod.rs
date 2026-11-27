@@ -1,5 +1,6 @@
 mod escapes;
 mod hooks;
+mod imports;
 mod mocking;
 mod private_access;
 mod reachability;
@@ -15,7 +16,7 @@ use self::representation::check_repr_assertions;
 use self::surface::SurfaceChecker;
 use crate::ast::ModulePath;
 use crate::ast::codebase::{Codebase, FileId, FuncId, IndexedFunc, IndexedType, TypeId};
-use crate::ast::item::{CallKind, CallReceiver, FieldDecl, Visibility};
+use crate::ast::item::{CallKind, CallReceiver, FieldDecl, ImportDecl, ImportKind, Visibility};
 use crate::config::{Config, TestCouplingConfig};
 use crate::diagnostic::{Diagnostic, Span};
 use crate::rules::Rule;
@@ -88,7 +89,7 @@ impl Rule for TestCouplingRule {
         if !cfg.enabled {
             return Vec::new();
         }
-        TestCouplingIndex::build(codebase).diagnose(cfg)
+        TestCouplingIndex::build(codebase, cfg.max_reexport_depth).diagnose(cfg)
     }
 }
 
@@ -102,10 +103,14 @@ pub(super) struct VisibleFieldMeta<'a> {
 
 pub(super) struct TestCouplingIndex<'a> {
     codebase: &'a Codebase,
+    max_reexport_depth: usize,
+    prod_files_by_mod: HashMap<&'a ModulePath, Vec<FileId>>,
+    explicit_imports_by_file_local: HashMap<FileId, HashMap<&'a str, Vec<&'a ImportDecl>>>,
+    has_inline_test_imports_by_file: HashSet<FileId>,
     prod_types_by_mod_name: HashMap<(&'a ModulePath, &'a str), TypeId>,
     prod_default_type_by_mod: HashMap<&'a ModulePath, TypeId>,
     prod_default_func_by_mod: HashMap<&'a ModulePath, FuncId>,
-    prod_free_by_mod_name: HashMap<(&'a ModulePath, &'a str), Vec<FuncId>>,
+    prod_free_by_mod_name: HashMap<&'a ModulePath, HashMap<&'a str, Vec<FuncId>>>,
     prod_free_by_name: HashMap<&'a str, Vec<FuncId>>,
     prod_methods_by_owner_name: HashMap<(TypeId, &'a str), Vec<FuncId>>,
     prod_interface_methods_by_owner_name: HashMap<(TypeId, &'a str), Vec<FuncId>>,
@@ -118,9 +123,13 @@ pub(super) struct TestCouplingIndex<'a> {
 }
 
 impl<'a> TestCouplingIndex<'a> {
-    fn build(codebase: &'a Codebase) -> Self {
+    fn build(codebase: &'a Codebase, max_reexport_depth: usize) -> Self {
         let mut index = Self {
             codebase,
+            max_reexport_depth,
+            prod_files_by_mod: HashMap::new(),
+            explicit_imports_by_file_local: HashMap::new(),
+            has_inline_test_imports_by_file: HashSet::new(),
             prod_types_by_mod_name: HashMap::new(),
             prod_default_type_by_mod: HashMap::new(),
             prod_default_func_by_mod: HashMap::new(),
@@ -135,6 +144,30 @@ impl<'a> TestCouplingIndex<'a> {
             private_fields: HashMap::new(),
             visible_fields: HashMap::new(),
         };
+        for (idx, file) in codebase.files().iter().enumerate() {
+            let file_id = FileId(idx);
+            if !file.is_test_file() {
+                index
+                    .prod_files_by_mod
+                    .entry(&file.module_path)
+                    .or_default()
+                    .push(file_id);
+            }
+            for imp in &file.imports {
+                if !file.is_test_file() && imp.in_test_module {
+                    index.has_inline_test_imports_by_file.insert(file_id);
+                }
+                if matches!(imp.kind, ImportKind::Default | ImportKind::Named) {
+                    index
+                        .explicit_imports_by_file_local
+                        .entry(file_id)
+                        .or_default()
+                        .entry(imp.local_name())
+                        .or_default()
+                        .push(imp);
+                }
+            }
+        }
         index.index_types();
         index.index_functions();
         index
@@ -142,6 +175,35 @@ impl<'a> TestCouplingIndex<'a> {
 
     pub(super) const fn codebase(&self) -> &'a Codebase {
         self.codebase
+    }
+
+    pub(super) const fn max_reexport_depth(&self) -> usize {
+        self.max_reexport_depth
+    }
+
+    pub(super) fn explicit_imports_for(
+        &self,
+        file_id: FileId,
+        local_name: &str,
+    ) -> &[&'a ImportDecl] {
+        self.explicit_imports_by_file_local
+            .get(&file_id)
+            .and_then(|by_name| by_name.get(local_name))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub(super) fn file_has_inline_test_imports(&self, file_id: FileId) -> bool {
+        self.has_inline_test_imports_by_file.contains(&file_id)
+    }
+
+    pub(super) fn has_prod_module(&self, module: &ModulePath) -> bool {
+        self.prod_files_by_mod.contains_key(module)
+    }
+
+    pub(super) fn prod_files_in_mod(&self, module: &ModulePath) -> &[FileId] {
+        self.prod_files_by_mod
+            .get(module)
+            .map_or(&[], Vec::as_slice)
     }
 
     pub(super) fn prod_type_in_mod(&self, module: &'a ModulePath, name: &'a str) -> Option<TypeId> {
@@ -152,7 +214,7 @@ impl<'a> TestCouplingIndex<'a> {
         self.prod_default_type_by_mod.get(module).copied()
     }
 
-    pub(super) fn prod_default_func_in_mod(&self, module: &'a ModulePath) -> Option<FuncId> {
+    pub(super) fn prod_default_func_in_mod(&self, module: &ModulePath) -> Option<FuncId> {
         self.prod_default_func_by_mod.get(module).copied()
     }
 
@@ -176,9 +238,10 @@ impl<'a> TestCouplingIndex<'a> {
         self.visible_fields.get(&(type_id, field_name)).copied()
     }
 
-    pub(super) fn prod_free_in_mod(&self, module: &'a ModulePath, name: &'a str) -> &[FuncId] {
+    pub(super) fn prod_free_in_mod(&self, module: &ModulePath, name: &str) -> &[FuncId] {
         self.prod_free_by_mod_name
-            .get(&(module, name))
+            .get(module)
+            .and_then(|by_name| by_name.get(name))
             .map_or(&[], Vec::as_slice)
     }
 
@@ -271,7 +334,9 @@ impl<'a> TestCouplingIndex<'a> {
 
             if func.decl.is_free_function() {
                 self.prod_free_by_mod_name
-                    .entry((&func.module_path, func.decl.name.as_str()))
+                    .entry(&func.module_path)
+                    .or_default()
+                    .entry(func.decl.name.as_str())
                     .or_default()
                     .push(func.id);
                 self.prod_free_by_name
@@ -381,6 +446,15 @@ impl<'a> TestCouplingIndex<'a> {
                 {
                     return Vec::new();
                 }
+                if let Some(imported) = imports::ImportResolver::new(self, self.max_reexport_depth)
+                    .resolve_imported_free_funcs(
+                        caller.file_id,
+                        self.is_test_func(caller),
+                        call.callee.as_str(),
+                    )
+                {
+                    return imported.funcs;
+                }
                 let in_mod = self.prod_free_in_mod(&caller.module_path, call.callee.as_str());
                 if !in_mod.is_empty() {
                     return in_mod.to_vec();
@@ -416,7 +490,16 @@ impl<'a> TestCouplingIndex<'a> {
                 let Some(CallReceiver::Named(path)) = call.receiver.as_ref() else {
                     return Vec::new();
                 };
-                self.prod_free_named(call.callee.as_str())
+                let target_mod = ModulePath::new(path.split("::").map(String::from).collect());
+                if call.callee == "default" {
+                    let resolved = imports::ImportResolver::new(self, self.max_reexport_depth)
+                        .resolve_module_export(&target_mod, "default", true);
+                    if !resolved.is_empty() {
+                        return resolved;
+                    }
+                }
+                let direct: Vec<FuncId> = self
+                    .prod_free_named(call.callee.as_str())
                     .iter()
                     .copied()
                     .filter(|&fid| {
@@ -425,7 +508,15 @@ impl<'a> TestCouplingIndex<'a> {
                             .module_path
                             .matches_qualified_path(path)
                     })
-                    .collect()
+                    .collect();
+                if !direct.is_empty() {
+                    return direct;
+                }
+                if self.has_prod_module(&target_mod) {
+                    return imports::ImportResolver::new(self, self.max_reexport_depth)
+                        .resolve_module_export(&target_mod, call.callee.as_str(), false);
+                }
+                Vec::new()
             }
         }
     }

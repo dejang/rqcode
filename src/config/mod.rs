@@ -280,6 +280,7 @@ pub struct TestCouplingConfig {
     #[serde(flatten)]
     pub abstractions: TestCouplingAbstractionFlags,
     pub public_api_scope: PublicApiScope,
+    pub max_reexport_depth: usize,
     pub severity: Severity,
 }
 
@@ -293,6 +294,7 @@ impl Default for TestCouplingConfig {
             mocking: TestCouplingMockFlags::default(),
             abstractions: TestCouplingAbstractionFlags::default(),
             public_api_scope: PublicApiScope::BinaryOnly,
+            max_reexport_depth: 4,
             severity: Severity::Error,
         }
     }

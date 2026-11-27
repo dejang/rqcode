@@ -1,7 +1,7 @@
 use rqcode::ast::codebase::Codebase;
 use rqcode::ast::item::{
-    ConditionalGuard, ExportBinding, ExportOrigin, FieldDecl, FieldInit, FunctionCouplingFacts, FunctionDecl, FunctionRole,
-    SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
+    ConditionalGuard, ExportBinding, ExportOrigin, FieldDecl, FieldInit, FunctionCouplingFacts,
+    FunctionDecl, FunctionRole, SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
 };
 use rqcode::ast::similarity::NormalizedTree;
 use rqcode::ast::{BarrelKind, FileAst, FileRole, ModulePath, SyntaxTree};
@@ -18,7 +18,7 @@ use std::path::Path;
 
 fn parse_ts(rel_path: &str, src: &str) -> (SyntaxTree, FileAst) {
     let tree = SyntaxTree::parse(rel_path, rel_path, typescript_language_spec(), src);
-    let ast = TypeScriptFrontend.extract(&tree, Path::new("."));
+    let ast = TypeScriptFrontend::new().extract(&tree, Path::new("."));
     (tree, ast)
 }
 
@@ -39,8 +39,8 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
         language: ts_spec.id(),
         member_separator: ts_spec.member_separator(),
         role: FileRole::Module,
-            barrel_kind: BarrelKind::None,
-            module_decls: Vec::new(),
+        barrel_kind: BarrelKind::None,
+        module_decls: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
         types: vec![TypeDecl {
@@ -57,7 +57,7 @@ fn non_rust_language_uses_generic_field_init_noun_in_test_coupling() {
                 name: "secret".into(),
                 type_name: None,
                 visibility: Visibility::Private,
-            explicit_visibility: false,
+                explicit_visibility: false,
                 is_mut_ref: false,
                 conditional_guard: ConditionalGuard::None,
                 span: Span::new("src/vault.ts", 2, 1, 2, 20),

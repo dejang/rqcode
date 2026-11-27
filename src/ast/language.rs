@@ -194,6 +194,14 @@ fn push_comment_directives(
 /// Tree-sitter / `ast-grep` grammar and lexical metadata provided by a language frontend.
 pub trait LanguageGrammar: Send + Sync {
     fn id(&self) -> LanguageId;
+
+    /// Semantic language identity used to unify multi-grammar dialects (such as `.ts` and `.tsx`)
+    /// during cross-file semantic analysis (`ModuleGraph`, `PublicSurface`, `SimilarityRule`).
+    /// Defaults to [`Self::id`].
+    fn semantic_id(&self) -> LanguageId {
+        self.id()
+    }
+
     fn aliases(&self) -> &'static [&'static str];
     fn extensions(&self) -> &'static [&'static str];
     fn comment_style(&self) -> CommentStyle;
@@ -222,6 +230,11 @@ impl LanguageSpec {
     #[must_use]
     pub fn id(&self) -> LanguageId {
         self.0.id()
+    }
+
+    #[must_use]
+    pub fn semantic_id(&self) -> LanguageId {
+        self.0.semantic_id()
     }
 
     #[must_use]

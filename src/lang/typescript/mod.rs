@@ -1,82 +1,67 @@
 mod body;
+mod components;
+mod conventions;
 mod coupling;
+mod expr;
 mod extract;
+mod grammar;
 mod imports;
+mod jsx;
 mod members;
 mod normalize;
+mod props;
 mod syntax;
 
+pub use self::conventions::TypeScriptConventions;
+pub use self::grammar::{tsx_language_spec, typescript_language_spec};
+
 use self::extract::TypeScriptExtractor;
-use crate::ast::{
-    CommentStyle, FileAst, FileRole, LanguageGrammar, LanguageId, LanguageSpec, ModulePath,
-    SyntaxTree,
-};
-use crate::lang::{LanguageFrontend, common};
+use crate::ast::{FileAst, FileRole, LanguageSpec, ModulePath, SyntaxTree};
+use crate::lang::LanguageFrontend;
 use ast_grep_core::Node;
-use ast_grep_core::language::Language;
-use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
-use ast_grep_language::TypeScript as AstGrepTypeScript;
-use std::borrow::Cow;
-use std::path::{Component, Path};
-use std::sync::Arc;
+use ast_grep_core::tree_sitter::StrDoc;
+use std::path::Path;
 
 type TsNode<'a> = Node<'a, StrDoc<LanguageSpec>>;
 
-struct TypeScriptGrammar;
-
-impl LanguageGrammar for TypeScriptGrammar {
-    fn id(&self) -> LanguageId {
-        LanguageId::new("typescript")
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["typescript", "ts"]
-    }
-
-    fn extensions(&self) -> &'static [&'static str] {
-        &["ts"]
-    }
-
-    fn comment_style(&self) -> CommentStyle {
-        CommentStyle::new("//", None, Some(("/*", "*/")), &[])
-    }
-
-    fn member_separator(&self) -> &'static str {
-        "."
-    }
-
-    fn ts_language(&self) -> TSLanguage {
-        AstGrepTypeScript.get_ts_language()
-    }
-
-    fn kind_to_id(&self, kind: &str) -> u16 {
-        AstGrepTypeScript.kind_to_id(kind)
-    }
-
-    fn field_to_id(&self, field: &str) -> Option<u16> {
-        AstGrepTypeScript.field_to_id(field)
-    }
-
-    fn expando_char(&self) -> char {
-        AstGrepTypeScript.expando_char()
-    }
-
-    fn pre_process_pattern<'q>(&self, query: &'q str) -> Cow<'q, str> {
-        AstGrepTypeScript.pre_process_pattern(query)
-    }
+#[derive(Debug, Clone, Default)]
+pub struct TypeScriptFrontend {
+    conventions: TypeScriptConventions,
 }
 
-/// Construct the [`LanguageSpec`] for TypeScript.
-#[must_use]
-pub fn typescript_language_spec() -> LanguageSpec {
-    LanguageSpec::new(Arc::new(TypeScriptGrammar))
-}
+impl TypeScriptFrontend {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-pub struct TypeScriptFrontend;
+    #[must_use]
+    pub fn with_conventions(conventions: TypeScriptConventions) -> Self {
+        Self { conventions }
+    }
+}
 
 impl LanguageFrontend for TypeScriptFrontend {
     fn grammar(&self) -> LanguageSpec {
         typescript_language_spec()
+    }
+
+    fn grammar_for_path(&self, path: &Path) -> LanguageSpec {
+        if self.conventions.is_tsx_path(path) {
+            tsx_language_spec()
+        } else {
+            typescript_language_spec()
+        }
+    }
+
+    fn additional_grammars(&self) -> Vec<LanguageSpec> {
+        vec![tsx_language_spec()]
+    }
+
+    /// Returns the static file extensions scanned during discovery (`LanguageFrontend` requires a
+    /// `'static` slice); injected `conventions.extensions` governs module-path and file-role logic.
+    fn extensions(&self) -> &'static [&'static str] {
+        &["ts", "tsx", "mts", "cts"]
     }
 
     fn default_excludes(&self) -> &'static [&'static str] {
@@ -84,64 +69,11 @@ impl LanguageFrontend for TypeScriptFrontend {
     }
 
     fn module_path(&self, _root: &Path, relative_path: &Path) -> ModulePath {
-        let components: Vec<String> = relative_path
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(seg) => seg.to_str().map(String::from),
-                _ => None,
-            })
-            .collect();
-
-        if components.is_empty() {
-            return ModulePath::new(vec![String::from("index")]);
-        }
-
-        let last_idx = components.len() - 1;
-        let mut segments = Vec::with_capacity(components.len());
-        for (idx, comp) in components.iter().enumerate() {
-            if idx == last_idx {
-                let without_ext = comp.strip_suffix(".ts").unwrap_or(comp);
-                let stem = without_ext
-                    .strip_suffix(".test")
-                    .or_else(|| without_ext.strip_suffix(".spec"))
-                    .unwrap_or(without_ext);
-                if stem != "index" && !stem.is_empty() {
-                    segments.push(stem.to_string());
-                }
-            } else {
-                segments.push(comp.clone());
-            }
-        }
-
-        if segments.is_empty() {
-            segments.push(String::from("index"));
-        }
-
-        ModulePath::new(segments)
+        self.conventions.module_path(relative_path)
     }
 
     fn file_role(&self, relative_path: &Path) -> FileRole {
-        let role = common::classify_file_role(
-            relative_path,
-            &["tests", "__tests__", "e2e"],
-            &[".test.ts", ".spec.ts"],
-            &[],
-            &["main.ts", "cli.ts"],
-        );
-        if role != FileRole::Module {
-            return role;
-        }
-        let normal: Vec<&str> = relative_path
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(seg) => seg.to_str(),
-                _ => None,
-            })
-            .collect();
-        if normal.as_slice() == ["index.ts"] || normal.as_slice() == ["src", "index.ts"] {
-            return FileRole::LibraryRoot;
-        }
-        FileRole::Module
+        self.conventions.file_role(relative_path)
     }
 
     fn extract_module(
@@ -150,7 +82,7 @@ impl LanguageFrontend for TypeScriptFrontend {
         module_path: ModulePath,
         role: FileRole,
     ) -> FileAst {
-        TypeScriptExtractor::new(tree, module_path).extract_file(role)
+        TypeScriptExtractor::new(tree, module_path, &self.conventions).extract_file(role)
     }
 }
 
@@ -169,14 +101,16 @@ mod tests {
     use crate::rules::test_coupling::TestCouplingRule;
 
     fn parse_ts(rel_path: &str, src: &str) -> (SyntaxTree, FileAst) {
-        let tree = SyntaxTree::parse(rel_path, rel_path, typescript_language_spec(), src);
-        let ast = TypeScriptFrontend.extract(&tree, Path::new("."));
+        let frontend = TypeScriptFrontend::new();
+        let spec = frontend.grammar_for_path(Path::new(rel_path));
+        let tree = SyntaxTree::parse(rel_path, rel_path, spec, src);
+        let ast = frontend.extract(&tree, Path::new("."));
         (tree, ast)
     }
 
     #[test]
     fn infers_typescript_module_paths() {
-        let f = TypeScriptFrontend;
+        let f = TypeScriptFrontend::new();
         let cases = [
             ("src/order.ts", "src::order"),
             ("src/order.test.ts", "src::order"),
@@ -184,6 +118,9 @@ mod tests {
             ("src/models/index.ts", "src::models"),
             ("index.ts", "index"),
             ("order.ts", "order"),
+            ("src/components/OrderCard.tsx", "src::components::OrderCard"),
+            ("src/components/OrderCard.TSX", "src::components::OrderCard"),
+            ("src/components/index.tsx", "src::components"),
         ];
         for (path, expected) in cases {
             assert_eq!(
@@ -195,23 +132,103 @@ mod tests {
 
     #[test]
     fn classifies_typescript_file_roles() {
-        let f = TypeScriptFrontend;
+        let f = TypeScriptFrontend::new();
         let cases = [
             ("tests/e2e.test.ts", FileRole::IntegrationTest),
             ("__tests__/order.spec.ts", FileRole::IntegrationTest),
             ("e2e/flow.ts", FileRole::IntegrationTest),
             ("src/order.test.ts", FileRole::UnitTest),
             ("src/order.spec.ts", FileRole::UnitTest),
+            ("src/components/__tests__/OrderCard.tsx", FileRole::UnitTest),
+            ("src/test-utils.tsx", FileRole::UnitTest),
             ("index.ts", FileRole::LibraryRoot),
             ("src/index.ts", FileRole::LibraryRoot),
+            ("src/index.tsx", FileRole::LibraryRoot),
             ("src/models/index.ts", FileRole::Module),
             ("src/main.ts", FileRole::BinaryEntrypoint),
+            ("src/main.tsx", FileRole::BinaryEntrypoint),
             ("src/cli.ts", FileRole::BinaryEntrypoint),
             ("src/order.ts", FileRole::Module),
         ];
         for (path, expected) in cases {
             assert_eq!(f.file_role(Path::new(path)), expected);
         }
+    }
+
+    #[test]
+    fn selects_grammar_for_path_and_class_component_lifecycle_preserves_library_mode() {
+        let f = TypeScriptFrontend::new();
+        assert_eq!(
+            f.grammar_for_path(Path::new("src/App.tsx")).id().as_str(),
+            "tsx"
+        );
+        assert_eq!(
+            f.grammar_for_path(Path::new("src/App.TSX")).id().as_str(),
+            "tsx"
+        );
+        assert_eq!(
+            f.grammar_for_path(Path::new("src/util.mts")).id().as_str(),
+            "typescript"
+        );
+
+        let (t_idx, f_idx) = parse_ts(
+            "src/index.tsx",
+            "export { ErrorBoundary } from './ErrorBoundary';\n",
+        );
+        let (t_eb, f_eb) = parse_ts(
+            "src/ErrorBoundary.tsx",
+            r"
+import React from 'react';
+
+export class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+    private reportFailure(err: Error): void {
+        console.error(err);
+    }
+
+    componentDidCatch(error: Error): void {
+        this.reportFailure(error);
+    }
+
+    render() {
+        return <div>{this.props.children}</div>;
+    }
+}
+",
+        );
+        let (t_test, f_test) = parse_ts(
+            "src/ErrorBoundary.test.tsx",
+            r"
+import { ErrorBoundary } from './ErrorBoundary';
+describe('ErrorBoundary', () => {
+    it('renders', () => {
+        const eb = new ErrorBoundary({ children: null });
+        expect(eb.render()).toBeDefined();
+    });
+});
+",
+        );
+
+        let catch_fn = f_eb
+            .functions
+            .iter()
+            .find(|fn_decl| fn_decl.name == "componentDidCatch")
+            .expect("componentDidCatch extracted");
+        assert!(catch_fn.is_interface_impl);
+        assert!(catch_fn.is_lifecycle);
+        assert_eq!(catch_fn.role, FunctionRole::Production);
+        assert_eq!(catch_fn.interface_name, None);
+
+        let codebase = Codebase::build(vec![t_idx, t_eb, t_test], vec![f_idx, f_eb, f_test]);
+        assert!(!codebase.is_binary_only_package());
+        let diags = TestCouplingRule.check(&codebase, &Config::default());
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.rule_id() == "test-only-production-api"
+                    && (d.message().contains("componentDidCatch")
+                        || d.message().contains("reportFailure"))),
+            "lifecycle root and its callee must remain production-reachable: {diags:?}"
+        );
     }
 
     #[test]

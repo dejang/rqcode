@@ -1,6 +1,7 @@
+use super::imports::ImportResolver;
 use super::{CallerMap, FieldReaderMap, TestCouplingIndex, TestCouplingRuleId};
 use crate::ast::ModulePath;
-use crate::ast::codebase::{EffectiveVisibility, FuncId, IndexedFunc, TypeId};
+use crate::ast::codebase::{EffectiveVisibility, FileId, FuncId, IndexedFunc, TypeId};
 use crate::ast::item::{CallKind, ConditionalGuard, TypeKind};
 use crate::config::{PublicApiScope, TestCouplingConfig};
 use crate::diagnostic::{Diagnostic, Span};
@@ -84,10 +85,11 @@ impl<'a> ReachabilityChecker<'a> {
                 self.enqueue(func.id);
             }
         }
-        for file in codebase.files() {
+        for (file_idx, file) in codebase.files().iter().enumerate() {
             if !file.is_test_file() {
+                let file_id = FileId(file_idx);
                 for ident in &file.top_level_idents {
-                    self.seed_ident_roots(&file.module_path, ident.as_str());
+                    self.seed_ident_roots(file_id, &file.module_path, ident.as_str());
                 }
             }
         }
@@ -139,30 +141,20 @@ impl<'a> ReachabilityChecker<'a> {
             }
         }
 
-        for file in codebase.files() {
+        for (file_idx, file) in codebase.files().iter().enumerate() {
             if file.is_test_file() {
                 continue;
             }
+            let file_id = FileId(file_idx);
             for ident in &file.top_level_idents {
-                for &fid in self
-                    .index
-                    .prod_free_in_mod(&file.module_path, ident.as_str())
-                {
-                    same_mod_called.insert(fid);
-                    calls_by_module.insert((&file.module_path, fid));
-                }
-                for &fid in self
-                    .index
-                    .prod_free_named(ident.as_str())
-                    .iter()
-                    .chain(self.index.prod_methods_named(ident.as_str()))
+                for fid in ImportResolver::new(self.index, self.index.max_reexport_depth())
+                    .ident_targets(file_id, false, &file.module_path, ident.as_str(), true)
                 {
                     let target = codebase.func(fid);
-                    if !self.index.is_callable_from(target, &file.module_path) {
-                        continue;
-                    }
                     calls_by_module.insert((&file.module_path, fid));
-                    if !file.module_path.is_same_or_child_of(&target.module_path) {
+                    if file.module_path.is_same_or_child_of(&target.module_path) {
+                        same_mod_called.insert(fid);
+                    } else {
                         external_called.insert(fid);
                     }
                 }
@@ -206,20 +198,15 @@ impl<'a> ReachabilityChecker<'a> {
                 == EffectiveVisibility::Public
     }
 
-    fn seed_ident_roots(&mut self, module_path: &'a ModulePath, ident: &'a str) {
-        let codebase = self.index.codebase();
-        for &fid in self.index.prod_free_in_mod(module_path, ident) {
+    fn seed_ident_roots(&mut self, file_id: FileId, module_path: &'a ModulePath, ident: &'a str) {
+        for fid in ImportResolver::new(self.index, self.index.max_reexport_depth()).ident_targets(
+            file_id,
+            false,
+            module_path,
+            ident,
+            true,
+        ) {
             self.enqueue(fid);
-        }
-        for &fid in self
-            .index
-            .prod_free_named(ident)
-            .iter()
-            .chain(self.index.prod_methods_named(ident))
-        {
-            if self.index.is_callable_from(codebase.func(fid), module_path) {
-                self.enqueue(fid);
-            }
         }
     }
 
@@ -335,18 +322,15 @@ impl<'a> ReachabilityChecker<'a> {
     fn collect_ident_edges(&self, func: &'a IndexedFunc, edges: &mut Vec<FuncId>) {
         let codebase = self.index.codebase();
         for ident in &func.decl.referenced_idents {
-            edges.extend_from_slice(
-                self.index
-                    .prod_free_in_mod(&func.module_path, ident.as_str()),
+            edges.extend(
+                ImportResolver::new(self.index, self.index.max_reexport_depth()).ident_targets(
+                    func.file_id,
+                    false,
+                    &func.module_path,
+                    ident.as_str(),
+                    false,
+                ),
             );
-            for &fid in self.index.prod_free_named(ident.as_str()) {
-                if self
-                    .index
-                    .is_callable_from(codebase.func(fid), &func.module_path)
-                {
-                    edges.push(fid);
-                }
-            }
         }
         for ident in &func.decl.scoped_ident_refs {
             for &fid in self.index.prod_methods_named(ident.as_str()) {

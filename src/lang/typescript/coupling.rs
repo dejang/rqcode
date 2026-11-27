@@ -1,4 +1,5 @@
 use super::TsNode;
+use super::conventions::TypeScriptConventions;
 use super::syntax;
 use crate::ast::item::{
     CallReceiver, FunctionCouplingFacts, ImportOrigin, InterfaceImpl, InterfaceImplRole,
@@ -9,7 +10,11 @@ use crate::ast::{ModulePath, SyntaxTree};
 pub(super) fn classify_import_origin(
     specifier: &str,
     resolved: Option<&ModulePath>,
+    conventions: &TypeScriptConventions,
 ) -> ImportOrigin {
+    if conventions.is_asset_specifier(specifier) {
+        return ImportOrigin::StandardValue;
+    }
     if resolved.is_some()
         || specifier.starts_with("@/")
         || specifier.starts_with("~/")
@@ -17,31 +22,10 @@ pub(super) fn classify_import_origin(
     {
         return ImportOrigin::Project;
     }
-    if matches!(
-        specifier,
-        "vitest"
-            | "jest"
-            | "@jest/globals"
-            | "node:test"
-            | "bun:test"
-            | "mocha"
-            | "chai"
-            | "ava"
-            | "tap"
-            | "lodash"
-            | "zod"
-            | "ramda"
-            | "date-fns"
-            | "dayjs"
-            | "clsx"
-            | "path"
-            | "node:path"
-            | "url"
-            | "node:url"
-    ) {
-        return ImportOrigin::StandardValue;
+    if conventions.is_external_boundary_package(specifier) {
+        return ImportOrigin::ExternalBoundary;
     }
-    ImportOrigin::ExternalBoundary
+    ImportOrigin::StandardValue
 }
 
 pub(super) fn extract_class_heritage(
@@ -122,6 +106,7 @@ fn extract_heritage_type(node: &TsNode<'_>) -> Option<TypeRef> {
 pub(super) struct TsCouplingInspector<'a> {
     tree: &'a SyntaxTree,
     base_dir: &'a [String],
+    conventions: &'a TypeScriptConventions,
     facts: &'a mut FunctionCouplingFacts,
 }
 
@@ -129,11 +114,13 @@ impl<'a> TsCouplingInspector<'a> {
     pub(super) fn new(
         tree: &'a SyntaxTree,
         base_dir: &'a [String],
+        conventions: &'a TypeScriptConventions,
         facts: &'a mut FunctionCouplingFacts,
     ) -> Self {
         Self {
             tree,
             base_dir,
+            conventions,
             facts,
         }
     }
@@ -164,7 +151,9 @@ impl<'a> TsCouplingInspector<'a> {
     }
 
     fn inspect_call(&mut self, node: &TsNode<'_>) {
-        if let Some(mock) = detect_module_mock(self.tree, self.base_dir, node, true) {
+        if let Some(mock) =
+            detect_module_mock(self.tree, self.base_dir, self.conventions, node, true)
+        {
             self.facts.module_mocks.push(mock);
         }
         let Some(func) = node.field("function") else {
@@ -374,6 +363,7 @@ fn is_test_string_literal(node: &TsNode<'_>) -> bool {
 pub(super) fn detect_module_mock(
     tree: &SyntaxTree,
     base_dir: &[String],
+    conventions: &TypeScriptConventions,
     call_node: &TsNode<'_>,
     in_test_context: bool,
 ) -> Option<ModuleMock> {
@@ -414,8 +404,12 @@ pub(super) fn detect_module_mock(
         return None;
     }
     let raw_specifier = syntax::unquote_string(&raw_text);
-    let resolved_module = syntax::resolve_relative_module_path(base_dir, &raw_specifier);
-    let origin = classify_import_origin(&raw_specifier, resolved_module.as_ref());
+    let resolved_module = if conventions.is_asset_specifier(&raw_specifier) {
+        None
+    } else {
+        syntax::resolve_relative_module_path(base_dir, &raw_specifier)
+    };
+    let origin = classify_import_origin(&raw_specifier, resolved_module.as_ref(), conventions);
     Some(ModuleMock {
         resolved_module,
         raw_specifier,

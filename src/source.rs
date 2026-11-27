@@ -111,7 +111,12 @@ impl SourceTree {
                 let rel = root
                     .file_name()
                     .map_or_else(|| root.to_path_buf(), PathBuf::from);
-                files.push(SourceFile::new(root, rel, frontend.grammar(), content));
+                files.push(SourceFile::new(
+                    root,
+                    rel,
+                    frontend.grammar_for_path(root),
+                    content,
+                ));
             }
             return Ok(Self {
                 root: root.parent().unwrap_or(root).to_path_buf(),
@@ -178,7 +183,12 @@ impl SourceTree {
                     source,
                 })?;
 
-            files.push(SourceFile::new(path, relative, frontend.grammar(), content));
+            files.push(SourceFile::new(
+                path,
+                relative,
+                frontend.grammar_for_path(path),
+                content,
+            ));
         }
 
         files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));

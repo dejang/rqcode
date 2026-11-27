@@ -210,6 +210,11 @@ impl SyntaxTree {
     }
 
     #[must_use]
+    pub fn semantic_language_id(&self) -> LanguageId {
+        self.language.semantic_id()
+    }
+
+    #[must_use]
     pub fn source(&self) -> &str {
         &self.source
     }

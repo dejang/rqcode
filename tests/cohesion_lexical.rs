@@ -22,7 +22,7 @@ fn build_codebase(files: &[(&str, &str)]) -> Codebase {
         let (tree, ast) = match Path::new(path).extension().and_then(OsStr::to_str) {
             Some("ts") => {
                 let tree = SyntaxTree::parse(path, path, typescript_language_spec(), src);
-                let ast = TypeScriptFrontend.extract(&tree, Path::new("."));
+                let ast = TypeScriptFrontend::new().extract(&tree, Path::new("."));
                 (tree, ast)
             }
             Some("swift") => {

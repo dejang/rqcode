@@ -1,7 +1,10 @@
 use super::TsNode;
+use super::conventions::TypeScriptConventions;
 use super::coupling;
 use super::syntax;
-use crate::ast::item::{ExportDecl, ExportOrigin, ImportDecl, ImportKind, ImportOrigin, Visibility};
+use crate::ast::item::{
+    ExportDecl, ExportOrigin, ImportDecl, ImportKind, ImportOrigin, Visibility,
+};
 use crate::ast::{BarrelKind, ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
 
@@ -61,11 +64,20 @@ impl ImportSource {
 pub(super) struct ModuleImportParser<'a> {
     tree: &'a SyntaxTree,
     base_dir: &'a [String],
+    conventions: &'a TypeScriptConventions,
 }
 
 impl<'a> ModuleImportParser<'a> {
-    pub(super) fn new(tree: &'a SyntaxTree, base_dir: &'a [String]) -> Self {
-        Self { tree, base_dir }
+    pub(super) fn new(
+        tree: &'a SyntaxTree,
+        base_dir: &'a [String],
+        conventions: &'a TypeScriptConventions,
+    ) -> Self {
+        Self {
+            tree,
+            base_dir,
+            conventions,
+        }
     }
 
     pub(super) fn parse_import(&self, node: &TsNode<'_>, in_test_file: bool) -> ImportBatch {
@@ -77,8 +89,17 @@ impl<'a> ModuleImportParser<'a> {
             return batch;
         };
         let specifier = syntax::unquote_string(&source_node.text());
-        let resolved_module = syntax::resolve_relative_module_path(self.base_dir, &specifier);
-        let origin = coupling::classify_import_origin(&specifier, resolved_module.as_ref());
+        let is_asset = self.conventions.is_asset_specifier(&specifier);
+        let resolved_module = if is_asset {
+            None
+        } else {
+            syntax::resolve_relative_module_path(self.base_dir, &specifier)
+        };
+        let origin = if is_asset {
+            ImportOrigin::StandardValue
+        } else {
+            coupling::classify_import_origin(&specifier, resolved_module.as_ref(), self.conventions)
+        };
         let module_segments = resolved_module
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.segments().to_vec());
@@ -129,6 +150,9 @@ impl<'a> ModuleImportParser<'a> {
         let has_source = source_field.is_some();
         let source_module = source_field.and_then(|s| {
             let spec = syntax::unquote_string(&s.text());
+            if self.conventions.is_asset_specifier(&spec) {
+                return None;
+            }
             syntax::resolve_relative_module_path(self.base_dir, &spec)
         });
         let source_origin = if !has_source {
@@ -224,14 +248,13 @@ pub(super) fn classify_barrel_kind(
     tree: &SyntaxTree,
     imports: &[ImportDecl],
     exports: &[ExportDecl],
-    index_stem: &str,
-    ambient_suffix: &str,
+    conventions: &TypeScriptConventions,
 ) -> BarrelKind {
     let rel_path = tree.relative_path();
     if rel_path
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.ends_with(ambient_suffix))
+        .is_some_and(|n| conventions.is_ambient_declaration(n))
         || !exports.iter().any(ExportDecl::is_reexport)
     {
         return BarrelKind::None;
@@ -239,7 +262,7 @@ pub(super) fn classify_barrel_kind(
     if rel_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .is_some_and(|s| s == index_stem)
+        .is_some_and(|s| conventions.library_root_stems.iter().any(|r| r == s))
     {
         return BarrelKind::DirectoryIndex;
     }
@@ -287,4 +310,118 @@ pub(super) fn classify_barrel_kind(
         }
     }
     BarrelKind::PureReexport
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Analyzer;
+    use crate::config::Config;
+
+    fn run_tc_project(files: &[(&str, &str)]) -> crate::Report {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (rel, body) in files {
+            let full = dir.path().join(rel);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&full, body).expect("write");
+        }
+        let cfg = Config::load_from_dir(dir.path()).expect("config");
+        Analyzer::from_config(&cfg, dir.path())
+            .expect("analyzer")
+            .check_path(dir.path(), &cfg)
+            .expect("check")
+    }
+
+    #[test]
+    fn ambiguous_alias_named_import_remains_reachable() {
+        let tc_only = "[cohesion]\nenabled = false\n[similarity]\nenabled = false\n[ast_grep]\nenabled = false\n";
+        let report = run_tc_project(&[
+            ("rqcode.toml", tc_only),
+            (
+                "src/main.tsx",
+                "import { Row } from '@/components/table/Row';\nexport function App() { return <Row />; }\ncreateRoot(rootEl).render(<App />);\n",
+            ),
+            (
+                "src/components/table/Row.tsx",
+                "export function Row() { return <tr><td>table</td></tr>; }\n",
+            ),
+            (
+                "src/components/list/Row.tsx",
+                "export function Row() { return <li>list</li>; }\n",
+            ),
+            (
+                "src/components/table/Row.test.tsx",
+                "import { describe, expect, it } from 'vitest';\nimport { Row } from './Row';\ndescribe('Row', () => { it('renders', () => { expect(Row()).toBeTruthy(); }); });\n",
+            ),
+        ]);
+        assert!(
+            report.diagnostics().is_empty(),
+            "ambiguous @/ import must preserve reachability:\n{}",
+            report.render_text()
+        );
+    }
+
+    #[test]
+    fn namespace_reexport_does_not_resolve_arbitrary_named_imports() {
+        let tc_only = "[cohesion]\nenabled = false\n[similarity]\nenabled = false\n[ast_grep]\nenabled = false\n";
+        let report = run_tc_project(&[
+            ("rqcode.toml", tc_only),
+            (
+                "src/main.tsx",
+                "import { DeadHelper } from './barrel';\nconsole.log(DeadHelper);\n",
+            ),
+            ("src/barrel.ts", "export * as UI from './ui';\n"),
+            ("src/ui.tsx", "export function DeadHelper() { return 1; }\n"),
+            (
+                "src/alt.tsx",
+                "export function DeadHelper() { return 2; }\n",
+            ),
+            (
+                "src/ui.test.tsx",
+                "import { describe, expect, it } from 'vitest';\nimport { DeadHelper } from './ui';\ndescribe('ui', () => { it('calls dead helper', () => { expect(DeadHelper()).toBe(1); }); });\n",
+            ),
+        ]);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.rule_id() == "test-only-production-api"
+                    && d.message().contains("DeadHelper")),
+            "export * as UI must not delegate arbitrary named imports:\n{}",
+            report.render_text()
+        );
+    }
+
+    #[test]
+    fn deep_barrel_and_renamed_local_export_resolve_cleanly() {
+        let tc_only = "[cohesion]\nenabled = false\n[similarity]\nenabled = false\n[ast_grep]\nenabled = false\n";
+        let report = run_tc_project(&[
+            ("rqcode.toml", tc_only),
+            (
+                "src/main.tsx",
+                "import { DeepHelper } from './b1';\nimport { PublicAlias } from './renamed';\nconsole.log(DeepHelper(), PublicAlias());\n",
+            ),
+            ("src/b1.ts", "export { DeepHelper } from './b2';\n"),
+            ("src/b2.ts", "export { DeepHelper } from './b3';\n"),
+            ("src/b3.ts", "export { DeepHelper } from './b4';\n"),
+            ("src/b4.ts", "export { DeepHelper } from './b5';\n"),
+            ("src/b5.ts", "export { DeepHelper } from './leaf';\n"),
+            (
+                "src/leaf.ts",
+                "export function DeepHelper() { return 1; }\n",
+            ),
+            (
+                "src/renamed.ts",
+                "function InternalImpl() { return 2; }\nexport { InternalImpl as PublicAlias };\n",
+            ),
+            (
+                "src/leaf.test.ts",
+                "import { describe, expect, it } from 'vitest';\nimport { DeepHelper } from './leaf';\nimport { PublicAlias } from './renamed';\ndescribe('exports', () => { it('runs', () => { expect(DeepHelper()).toBe(1); expect(PublicAlias()).toBe(2); }); });\n",
+            ),
+        ]);
+        assert!(
+            report.diagnostics().is_empty(),
+            "deep >4-hop barrel and renamed local export must stay reachable:\n{}",
+            report.render_text()
+        );
+    }
 }

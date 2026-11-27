@@ -153,8 +153,9 @@ fn parse_rust_mod(
     let mut ast = RustFrontend.extract(&tree, Path::new("."));
     ast.module_path = ModulePath::new(segs.iter().map(|s| (*s).to_owned()).collect());
     if let Some(target) = import_target {
-        ast.imports[0].resolved_module =
-            Some(ModulePath::new(target.iter().map(|s| (*s).to_owned()).collect()));
+        ast.imports[0].resolved_module = Some(ModulePath::new(
+            target.iter().map(|s| (*s).to_owned()).collect(),
+        ));
     }
     (tree, ast)
 }
@@ -166,11 +167,12 @@ fn parse_ts_mod(
     src: &str,
 ) -> (SyntaxTree, rqcode::ast::FileAst) {
     let tree = SyntaxTree::parse(rel, rel, typescript_language_spec(), src);
-    let mut ast = TypeScriptFrontend.extract(&tree, Path::new("."));
+    let mut ast = TypeScriptFrontend::new().extract(&tree, Path::new("."));
     ast.module_path = ModulePath::new(segs.iter().map(|s| (*s).to_owned()).collect());
     if let Some(target) = import_target {
-        ast.imports[0].resolved_module =
-            Some(ModulePath::new(target.iter().map(|s| (*s).to_owned()).collect()));
+        ast.imports[0].resolved_module = Some(ModulePath::new(
+            target.iter().map(|s| (*s).to_owned()).collect(),
+        ));
     }
     (tree, ast)
 }
@@ -184,16 +186,36 @@ fn module_graph_partitions_by_language_id_even_with_colliding_paths() -> Result<
 
     // Case 1: colliding ModulePaths across Rust & TS (Rust a->b, TS b->a) -> 0 cycles
     let items_acyclic = [
-        parse_rust_mod("shared/a.rs", &["shared", "a"], Some(&["shared", "b"]), "use crate::b::B;
+        parse_rust_mod(
+            "shared/a.rs",
+            &["shared", "a"],
+            Some(&["shared", "b"]),
+            "use crate::b::B;
 pub struct A;
-"),
-        parse_rust_mod("shared/b.rs", &["shared", "b"], None, "pub struct B;
-"),
-        parse_ts_mod("shared/a.ts", &["shared", "a"], None, "export class A {}
-"),
-        parse_ts_mod("shared/b.ts", &["shared", "b"], Some(&["shared", "a"]), "import { A } from './a';
+",
+        ),
+        parse_rust_mod(
+            "shared/b.rs",
+            &["shared", "b"],
+            None,
+            "pub struct B;
+",
+        ),
+        parse_ts_mod(
+            "shared/a.ts",
+            &["shared", "a"],
+            None,
+            "export class A {}
+",
+        ),
+        parse_ts_mod(
+            "shared/b.ts",
+            &["shared", "b"],
+            Some(&["shared", "a"]),
+            "import { A } from './a';
 export class B {}
-"),
+",
+        ),
     ];
     let (trees, asts): (Vec<_>, Vec<_>) = items_acyclic.into_iter().unzip();
     let acyclic_diags = registry.run(&Codebase::build(trees, asts), &cfg);
@@ -201,20 +223,43 @@ export class B {}
 
     // Case 2: real Rust cycle (a<->b) alongside colliding acyclic TS files -> 1 cycle
     let items_cyclic = [
-        parse_rust_mod("shared/a.rs", &["shared", "a"], Some(&["shared", "b"]), "use crate::b::B;
+        parse_rust_mod(
+            "shared/a.rs",
+            &["shared", "a"],
+            Some(&["shared", "b"]),
+            "use crate::b::B;
 pub struct A;
-"),
-        parse_rust_mod("shared/b.rs", &["shared", "b"], Some(&["shared", "a"]), "use crate::a::A;
+",
+        ),
+        parse_rust_mod(
+            "shared/b.rs",
+            &["shared", "b"],
+            Some(&["shared", "a"]),
+            "use crate::a::A;
 pub struct B;
-"),
-        parse_ts_mod("shared/a.ts", &["shared", "a"], None, "export class A {}
-"),
-        parse_ts_mod("shared/b.ts", &["shared", "b"], None, "export class B {}
-"),
+",
+        ),
+        parse_ts_mod(
+            "shared/a.ts",
+            &["shared", "a"],
+            None,
+            "export class A {}
+",
+        ),
+        parse_ts_mod(
+            "shared/b.ts",
+            &["shared", "b"],
+            None,
+            "export class B {}
+",
+        ),
     ];
     let (trees, asts): (Vec<_>, Vec<_>) = items_cyclic.into_iter().unzip();
     let cyclic_diags = registry.run(&Codebase::build(trees, asts), &cfg);
-    assert_eq!(diags_for(&cyclic_diags, "cyclic-module-dependency").len(), 1);
+    assert_eq!(
+        diags_for(&cyclic_diags, "cyclic-module-dependency").len(),
+        1
+    );
     Ok(())
 }
 
@@ -252,7 +297,7 @@ export class C {
 }
 ",
     );
-    let ts_ast = TypeScriptFrontend.extract(&ts_tree, Path::new("."));
+    let ts_ast = TypeScriptFrontend::new().extract(&ts_tree, Path::new("."));
     let c = &ts_ast.types[0];
     assert_eq!(c.fields[0].visibility, Visibility::Public);
     assert!(!c.fields[0].explicit_visibility);

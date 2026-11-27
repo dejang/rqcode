@@ -94,7 +94,7 @@ All language-specific logic is confined to `src/lang/<language>/` and injected v
 ### Built-in Frontends
 
 - **Rust** (`src/lang/rust/`): `.rs` - structs, enums, traits, inherent/trait `impl`s, `#[cfg(test)]` modules, macro token extraction, `use` / `pub use` re-exports, crate/module path resolution.
-- **TypeScript** (`src/lang/typescript/`): `.ts`, `.tsx`, `.mts`, `.cts` - classes, interfaces, type aliases, parameter properties, decorators, constructors/static/instance methods, ES imports, default/namespace/barrel re-exports (`export *`, `export * as ns`, import-then-export), and `describe`/`it`/`test` suites.
+- **TypeScript & React/TSX** (`src/lang/typescript/`): `.ts`, `.tsx`, `.mts`, `.cts` - classes (including `React.Component`/`PureComponent` lifecycle methods), interfaces, file-local prop-shape type alias resolution (`PropsWithChildren`, `Readonly`, `Partial`, `Required`, intersections), destructured props & `useState<T>` hooks, `React.memo`/`forwardRef`/`React.lazy`/HOC components, JSX tag/component extraction and CST normalization, parameter properties, decorators, constructors/static/instance methods, ES imports, relative asset imports (`.css`, `.svg`, etc.), default/namespace/barrel re-exports (`export *`, `export * as ns`, import-then-export), and `describe`/`it`/`test` suites. Conventions are injectable via `TypeScriptConventions`; third-party I/O SDKs outside the default `external_boundary_packages` allowlist (e.g., `openai`, `@octokit/rest`, `@apollo/client`) default to `StandardValue` unless added via `TypeScriptConventions::external_boundary_packages` (ambient `fetch`/`WebSocket`/`localStorage` calls remain automatically detected as external boundaries).
 - **Swift** (`src/lang/swift/`): `.swift` - structs, classes, actors, enums, protocols, inherent vs. protocol-conformance `extension`s, `init`/`deinit`, stored & computed properties, access levels (`open`/`public`/`internal`/`package`/`fileprivate`/`private`/`private(set)`), attributes (`@MainActor`, `@main`), `inout` parameters, `@testable`/`@_exported`/scoped imports, SwiftPM & Xcode target layouts, and `XCTestCase` / Swift Testing (`@Suite`, `@Test`) suites.
 
 ---
@@ -141,6 +141,8 @@ See [docs/cohesion.md](docs/cohesion.md) for the literature survey, formal defin
 
 See [docs/test_coupling.md](docs/test_coupling.md) for the rule taxonomy, three-phase analysis pipeline, per-language mappings, false-positive boundaries, and design rationale.
 
+Known polyglot limitation: `public_api_scope = "binary-only"` evaluates binary-only package detection globally across the scanned repository, so a mixed repository containing both a library root (for example `src/lib.rs`) and a binary entrypoint in another language (for example `src/main.tsx`) disables binary-only public-API checking globally unless `public_api_scope = "all"` is set.
+
 #### 3. Structural Similarity (`similarity`)
 | Diagnostic ID | What it catches |
 | ------------- | --------------- |
@@ -151,7 +153,7 @@ See [docs/similarity.md](docs/similarity.md) for the literature survey, crates/a
 
 ### Embedded & Custom `ast-grep` YAML Rules (`rules/`)
 
-`build.rs` embeds all YAML rules under `rules/` directly into the binary at compile time. You can layer project-specific YAML rules on top via `ast_grep.rules_dir` (same rule ID overrides the built-in) or disable individual/all built-ins.
+`build.rs` embeds all YAML rules under `rules/` directly into the binary at compile time. You can layer project-specific YAML rules on top via `ast_grep.rules_dir` (same rule ID overrides the built-in) or disable individual/all built-ins. For custom TypeScript rules, specify `language: Tsx` (or `language = "tsx"`) to target `.tsx` JSX files and `language: TypeScript` to target `.ts`/`.mts`/`.cts` files.
 
 Built-in Rust YAML rules (`rules/rust/*.yml`):
 

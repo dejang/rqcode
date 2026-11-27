@@ -115,7 +115,9 @@ impl Analyzer {
             .files()
             .par_iter()
             .filter_map(|file| {
-                let frontend = self.languages.frontend_for_id(file.language_id())?;
+                let frontend = self
+                    .languages
+                    .frontend_for_id(file.language().semantic_id())?;
                 let tree = SyntaxTree::parse(
                     file.path(),
                     file.relative_path(),

@@ -20,7 +20,7 @@ export class Order {
 }
 ",
     );
-    let ts_ast = TypeScriptFrontend.extract(&ts_tree, Path::new("."));
+    let ts_ast = TypeScriptFrontend::new().extract(&ts_tree, Path::new("."));
     let ctor = ts_ast
         .functions
         .iter()
@@ -108,7 +108,7 @@ export class MutableParam {
 }
 ",
     );
-    let ts_ast = TypeScriptFrontend.extract(&ts_tree, Path::new("."));
+    let ts_ast = TypeScriptFrontend::new().extract(&ts_tree, Path::new("."));
     let by_name = |name: &str| {
         ts_ast
             .types
@@ -152,7 +152,7 @@ fn frontends_set_export_origin_and_span_for_direct_internal_reexports() {
         typescript_language_spec(),
         "export class A {}\nexport { B } from './b';\n",
     );
-    let ts_ast = TypeScriptFrontend.extract(&ts_tree, Path::new("."));
+    let ts_ast = TypeScriptFrontend::new().extract(&ts_tree, Path::new("."));
     let reexport = ts_ast
         .exports
         .iter()

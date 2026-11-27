@@ -1,9 +1,62 @@
 use super::TsNode;
+use super::jsx;
 use crate::ast::ModulePath;
 use crate::ast::item::{TypeRef, Visibility};
+use std::ops::Range;
 
-pub(super) fn collect_leaf_idents(node: &TsNode<'_>, out: &mut Vec<String>) {
-    crate::lang::common::collect_leaf_idents(node, "identifier", out);
+pub(super) fn extract_static_string_key(node: &TsNode<'_>) -> Option<String> {
+    match node.kind().as_ref() {
+        "string" => {
+            let unquoted = unquote_string(&node.text());
+            (!unquoted.is_empty()).then_some(unquoted)
+        }
+        "template_string" => {
+            if node.children().any(|c| c.kind() == "template_substitution") {
+                return None;
+            }
+            let unquoted = unquote_string(&node.text());
+            (!unquoted.is_empty()).then_some(unquoted)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn collect_leaf_idents(
+    node: &TsNode<'_>,
+    excluded_range: Option<&Range<usize>>,
+    out: &mut Vec<String>,
+) {
+    if excluded_range == Some(&node.range()) {
+        return;
+    }
+    match node.kind().as_ref() {
+        "jsx_closing_element" => return,
+        "jsx_opening_element" | "jsx_self_closing_element" => {
+            let skip_name_range = node.field("name").and_then(|name_node| {
+                let is_intrinsic = name_node.kind() == "identifier"
+                    && jsx::is_intrinsic_jsx_tag(name_node.text().as_ref());
+                (is_intrinsic || name_node.kind() == "jsx_namespace_name")
+                    .then(|| name_node.range())
+            });
+            for child in node.children() {
+                if skip_name_range == Some(child.range()) {
+                    continue;
+                }
+                collect_leaf_idents(&child, excluded_range, out);
+            }
+            return;
+        }
+        _ => {}
+    }
+    if node.is_leaf() {
+        if node.kind() == "identifier" {
+            out.push(node.text().into_owned());
+        }
+        return;
+    }
+    for child in node.children() {
+        collect_leaf_idents(&child, excluded_range, out);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,6 +114,32 @@ impl TestRunnerKind {
             _ => None,
         }
     }
+}
+
+pub(super) fn extract_test_runner_args<'a>(
+    call_node: &TsNode<'a>,
+) -> Option<(Option<String>, TsNode<'a>)> {
+    let args = call_node.field("arguments")?;
+    let mut title: Option<String> = None;
+    let mut callback = None;
+
+    for arg in args.children() {
+        if !arg.is_named() {
+            continue;
+        }
+        if title.is_none() && matches!(arg.kind().as_ref(), "string" | "template_string") {
+            let cleaned = unquote_string(&arg.text()).trim().to_string();
+            if !cleaned.is_empty() {
+                title = Some(cleaned);
+            }
+        } else if matches!(
+            arg.kind().as_ref(),
+            "arrow_function" | "function_expression"
+        ) {
+            callback = Some(arg);
+        }
+    }
+    Some((title, callback?))
 }
 
 pub(super) fn join_dotted_path(raw: &str) -> Option<String> {
@@ -147,7 +226,8 @@ pub(super) fn collect_decorators(node: &TsNode<'_>, out: &mut Vec<String>) {
 }
 
 pub(super) fn has_explicit_visibility(node: &TsNode<'_>) -> bool {
-    node.children().any(|c| c.kind() == "accessibility_modifier")
+    node.children()
+        .any(|c| c.kind() == "accessibility_modifier")
 }
 
 pub(super) fn extract_visibility(node: &TsNode<'_>) -> Visibility {
@@ -232,7 +312,7 @@ pub(super) fn resolve_relative_module_path(
     base_dir: &[String],
     specifier: &str,
 ) -> Option<ModulePath> {
-    let spec = specifier.trim();
+    let spec = specifier.trim().split('?').next().unwrap_or("");
     if spec != "." && spec != ".." && !spec.starts_with("./") && !spec.starts_with("../") {
         return None;
     }
@@ -250,8 +330,11 @@ pub(super) fn resolve_relative_module_path(
                 let mut cleaned = seg;
                 if idx == last_idx {
                     for ext in [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"] {
-                        if let Some(stem) = seg.strip_suffix(ext) {
-                            cleaned = stem;
+                        if seg.len() >= ext.len()
+                            && seg.is_char_boundary(seg.len() - ext.len())
+                            && seg[seg.len() - ext.len()..].eq_ignore_ascii_case(ext)
+                        {
+                            cleaned = &seg[..seg.len() - ext.len()];
                             break;
                         }
                     }
@@ -267,4 +350,33 @@ pub(super) fn resolve_relative_module_path(
         base.push(String::from("index"));
     }
     Some(ModulePath::new(base))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_leaf_idents_with_exclusion_skips_intrinsic_jsx_tags() {
+        let src = "export default withFallback(<label>Loading</label>)(BannerView);";
+        let tree = crate::ast::SyntaxTree::parse(
+            "src/Banner.tsx",
+            "src/Banner.tsx",
+            crate::lang::typescript::tsx_language_spec(),
+            src,
+        );
+        let root = tree.root();
+        let export = root.children().next().expect("export");
+        let call = export.field("value").expect("call");
+        let args = call.field("arguments").expect("args");
+        let target = args
+            .children()
+            .find(|c| c.kind() == "identifier")
+            .expect("BannerView");
+        let mut idents = Vec::new();
+        collect_leaf_idents(&call, Some(&target.range()), &mut idents);
+        assert!(idents.iter().any(|id| id == "withFallback"));
+        assert!(!idents.iter().any(|id| id == "BannerView"));
+        assert!(!idents.iter().any(|id| id == "label"));
+    }
 }

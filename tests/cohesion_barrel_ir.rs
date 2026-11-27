@@ -9,7 +9,7 @@ use std::path::Path;
 
 fn parse_ts(path: &str, src: &str) -> FileAst {
     let tree = SyntaxTree::parse(path, path, typescript_language_spec(), src);
-    TypeScriptFrontend.extract(&tree, Path::new("."))
+    TypeScriptFrontend::new().extract(&tree, Path::new("."))
 }
 
 #[test]

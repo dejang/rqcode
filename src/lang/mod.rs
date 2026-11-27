@@ -9,7 +9,22 @@ use std::path::Path;
 
 /// Translates a language-specific Tree-sitter CST into the language-agnostic `FileAst`.
 pub trait LanguageFrontend: Send + Sync {
+    /// Returns this frontend's default dialect grammar. Path-aware callers should use
+    /// [`Self::grammar_for_path`] so multi-dialect frontends can select the matching grammar.
     fn grammar(&self) -> LanguageSpec;
+
+    /// Returns the Tree-sitter grammar for a specific source file path.
+    /// Multi-dialect frontends (such as TypeScript + TSX) override this to select
+    /// the matching dialect grammar instead of the default [`Self::grammar`].
+    fn grammar_for_path(&self, _path: &Path) -> LanguageSpec {
+        self.grammar()
+    }
+
+    /// Additional dialect grammars owned by this frontend (for `ast-grep`
+    /// rule resolution and ID lookup).
+    fn additional_grammars(&self) -> Vec<LanguageSpec> {
+        Vec::new()
+    }
 
     fn id(&self) -> LanguageId {
         self.grammar().id()
@@ -52,7 +67,7 @@ impl LanguageRegistry {
     pub fn with_defaults() -> Self {
         let mut registry = Self::empty();
         registry.register(Box::new(rust::RustFrontend));
-        registry.register(Box::new(typescript::TypeScriptFrontend));
+        registry.register(Box::new(typescript::TypeScriptFrontend::new()));
         registry.register(Box::new(swift::SwiftFrontend::new()));
         registry
     }
@@ -74,16 +89,24 @@ impl LanguageRegistry {
     pub fn frontend_for_id(&self, id: LanguageId) -> Option<&dyn LanguageFrontend> {
         self.frontends
             .iter()
-            .find(|f| f.id() == id)
+            .find(|f| f.id() == id || f.additional_grammars().iter().any(|g| g.id() == id))
             .map(Box::as_ref)
     }
 
     #[must_use]
     pub fn resolve_language(&self, name: &str) -> Option<LanguageSpec> {
-        self.frontends
-            .iter()
-            .map(|f| f.grammar())
-            .find(|spec| spec.matches_name(name))
+        for frontend in &self.frontends {
+            let primary = frontend.grammar();
+            if primary.matches_name(name) {
+                return Some(primary);
+            }
+            for extra in frontend.additional_grammars() {
+                if extra.matches_name(name) {
+                    return Some(extra);
+                }
+            }
+        }
+        None
     }
 
     #[must_use]

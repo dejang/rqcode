@@ -18,7 +18,7 @@ fn parse_rust(rel_path: &str, src: &str) -> (SyntaxTree, FileAst) {
 
 fn parse_ts(rel_path: &str, src: &str) -> (SyntaxTree, FileAst) {
     let tree = SyntaxTree::parse(rel_path, rel_path, typescript_language_spec(), src);
-    let ast = TypeScriptFrontend.extract(&tree, Path::new("."));
+    let ast = TypeScriptFrontend::new().extract(&tree, Path::new("."));
     (tree, ast)
 }
 

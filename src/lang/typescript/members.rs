@@ -1,14 +1,14 @@
 use super::TsNode;
 use super::body::TsBodyWalker;
 use super::coupling;
+use super::expr::TsBodyContext;
+use super::props::{self, ExtractedParams};
 use super::syntax;
 use crate::ast::item::{
-    ConditionalGuard, ExportBinding, FieldDecl, FunctionDecl, FunctionRole, InterfaceImpl, ParamAccess, ParamDecl,
-    SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
+    ConditionalGuard, ExportBinding, FieldDecl, FunctionDecl, FunctionRole, InterfaceImpl,
+    ParamAccess, ParamDecl, SubclassPolicy, TypeDecl, TypeKind, TypeRef, Visibility,
 };
-use crate::ast::{ModulePath, SyntaxTree};
 use crate::lang::common::FunctionHeader;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub(super) struct DeclMeta {
@@ -49,22 +49,12 @@ impl ClassFields {
 }
 
 pub(super) struct TsMemberExtractor<'a, 'b> {
-    tree: &'a SyntaxTree,
-    base_dir: &'b [String],
-    namespace_imports: &'b HashMap<String, ModulePath>,
+    ctx: &'b TsBodyContext<'a, 'b>,
 }
 
 impl<'a, 'b> TsMemberExtractor<'a, 'b> {
-    pub(super) fn new(
-        tree: &'a SyntaxTree,
-        base_dir: &'b [String],
-        namespace_imports: &'b HashMap<String, ModulePath>,
-    ) -> Self {
-        Self {
-            tree,
-            base_dir,
-            namespace_imports,
-        }
+    pub(super) fn new(ctx: &'b TsBodyContext<'a, 'b>) -> Self {
+        Self { ctx }
     }
 
     pub(super) fn extract_class(
@@ -78,6 +68,15 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
         let mut methods = Vec::new();
         let mut annotations = outer_annotations.to_vec();
         syntax::collect_decorators(node, &mut annotations);
+
+        let (base_types, interface_impls) =
+            coupling::extract_class_heritage(node, &name, meta.in_test_context, self.ctx.tree());
+        let is_react_component = base_types.iter().any(|ty| {
+            matches!(
+                ty,
+                TypeRef::Named(base) if self.ctx.conventions().is_component_base_class(base)
+            )
+        });
 
         if let Some(body) = node.field("body") {
             for child in body.children() {
@@ -98,7 +97,7 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
                                     explicit_visibility: syntax::has_explicit_visibility(&child),
                                     is_mut_ref: false,
                                     conditional_guard: ConditionalGuard::None,
-                                    span: self.tree.node_span(&child),
+                                    span: self.ctx.tree().node_span(&child),
                                 },
                                 syntax::has_modifier_token(&child, "readonly"),
                             );
@@ -109,6 +108,7 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
                             &child,
                             &name,
                             meta.in_test_context,
+                            is_react_component,
                             &mut class_fields,
                         ) {
                             methods.push(method);
@@ -119,8 +119,6 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
             }
         }
 
-        let (base_types, interface_impls) =
-            coupling::extract_class_heritage(node, &name, meta.in_test_context, self.tree);
         let subclass_policy = if node.kind() == "abstract_class_declaration" {
             SubclassPolicy::Open
         } else {
@@ -139,7 +137,7 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
             base_types,
             fields: class_fields.fields,
             annotations,
-            span: self.tree.node_span(node),
+            span: self.ctx.tree().node_span(node),
         };
         Some(ExtractedClass {
             decl,
@@ -153,11 +151,14 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
         node: &TsNode<'a>,
         owner_name: &str,
         in_test_context: bool,
+        is_react_component: bool,
         class_fields: &mut ClassFields,
     ) -> Option<FunctionDecl> {
         let name = node.field("name")?.text().into_owned();
         let is_ctor = name == "constructor";
         let is_static = syntax::has_modifier_token(node, "static");
+        let is_component_lifecycle =
+            is_react_component && self.ctx.conventions().is_component_lifecycle_method(&name);
         let self_receiver = (!is_ctor && !is_static).then_some(ParamAccess::MutableRef);
         let return_type = if is_ctor {
             Some(TypeRef::SelfType)
@@ -165,35 +166,38 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
             node.field("return_type")
                 .and_then(|t| syntax::extract_type_ref(&t))
         };
-        let params = node
-            .field("parameters")
-            .map_or_else(Vec::new, |param_list| {
-                self.extract_param_list(&param_list, is_ctor.then_some(class_fields))
-            });
+        let extracted =
+            node.field("parameters")
+                .map_or_else(ExtractedParams::default, |param_list| {
+                    self.extract_param_list(&param_list, is_ctor.then_some(class_fields), None)
+                });
         let role = if in_test_context {
             FunctionRole::TestHelper
         } else {
             FunctionRole::Production
         };
-        let body = TsBodyWalker::new(self.tree, self.base_dir, self.namespace_imports)
-            .extract(node.field("body"));
+        let body = TsBodyWalker::new(self.ctx).extract_with_seeds(
+            node.field("body"),
+            extracted.local_bindings,
+            &extracted.default_exprs,
+        );
 
         Some(body.into_function_decl(
             FunctionHeader {
                 name,
                 owner_type: Some(owner_name.to_string()),
-                is_interface_impl: false,
+                is_interface_impl: is_component_lifecycle,
                 interface_name: None,
                 self_receiver,
                 visibility: syntax::extract_visibility(node),
                 explicit_visibility: syntax::has_explicit_visibility(node),
                 export_binding: ExportBinding::Standard,
-                is_lifecycle: is_ctor,
+                is_lifecycle: is_ctor || is_component_lifecycle,
                 role,
-                params,
+                params: extracted.params,
                 return_type,
             },
-            self.tree.node_span(node),
+            self.ctx.tree().node_span(node),
         ))
     }
 
@@ -214,7 +218,7 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
                         explicit_visibility: false,
                         is_mut_ref: false,
                         conditional_guard: ConditionalGuard::None,
-                        span: self.tree.node_span(&child),
+                        span: self.ctx.tree().node_span(&child),
                     });
                 }
             }
@@ -231,7 +235,7 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
             base_types: Vec::new(),
             fields,
             annotations: Vec::new(),
-            span: self.tree.node_span(node),
+            span: self.ctx.tree().node_span(node),
         })
     }
 
@@ -249,32 +253,44 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
             base_types: Vec::new(),
             fields: Vec::new(),
             annotations: Vec::new(),
-            span: self.tree.node_span(node),
+            span: self.ctx.tree().node_span(node),
         })
     }
 
-    pub(super) fn extract_callable_params(&self, node: &TsNode<'a>) -> Vec<ParamDecl> {
+    pub(super) fn extract_callable_params(
+        &self,
+        node: &TsNode<'a>,
+        prop_type_hint: Option<&TsNode<'a>>,
+    ) -> ExtractedParams<'a> {
         if let Some(param_list) = node.field("parameters") {
-            return self.extract_param_list(&param_list, None);
+            return self.extract_param_list(&param_list, None, prop_type_hint);
         }
         if let Some(single) = node.field("parameter")
             && single.kind() == "identifier"
         {
-            return vec![ParamDecl {
-                name: single.text().into_owned(),
-                type_name: None,
-                access: ParamAccess::Owned,
-            }];
+            let type_name = prop_type_hint.and_then(syntax::extract_type_ref);
+            return ExtractedParams {
+                params: vec![ParamDecl {
+                    name: single.text().into_owned(),
+                    type_name,
+                    access: ParamAccess::Owned,
+                }],
+                local_bindings: Vec::new(),
+                default_exprs: Vec::new(),
+            };
         }
-        Vec::new()
+        ExtractedParams::default()
     }
 
     fn extract_param_list(
         &self,
         param_list: &TsNode<'a>,
         mut ctor_fields: Option<&mut ClassFields>,
-    ) -> Vec<ParamDecl> {
-        let mut params = Vec::new();
+        prop_type_hint: Option<&TsNode<'a>>,
+    ) -> ExtractedParams<'a> {
+        let mut out = ExtractedParams::default();
+        let mut param_idx = 0usize;
+
         for child in param_list.children() {
             if !matches!(
                 child.kind().as_ref(),
@@ -282,12 +298,43 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
             ) {
                 continue;
             }
+            let external_hint = if param_idx == 0 { prop_type_hint } else { None };
+            param_idx += 1;
+
+            let pattern = child.field("pattern").or_else(|| child.field("name"));
+            if let Some(pat) = pattern
+                && pat.kind() == "object_pattern"
+            {
+                let type_node = child.field("type");
+                let param_ty = type_node
+                    .as_ref()
+                    .and_then(syntax::extract_type_ref)
+                    .or_else(|| external_hint.and_then(syntax::extract_type_ref));
+                let shape = props::resolve_param_prop_shape(
+                    type_node.as_ref(),
+                    external_hint,
+                    self.ctx.prop_shapes(),
+                    self.ctx.conventions(),
+                );
+                shape.extract_bindings(&pat, param_ty.as_ref(), self.ctx.prop_shapes(), &mut out);
+                if let Some(default_val) = child.field("value") {
+                    out.default_exprs.push(default_val);
+                }
+                out.params.push(ParamDecl {
+                    name: String::new(),
+                    type_name: param_ty,
+                    access: ParamAccess::Owned,
+                });
+                continue;
+            }
+
             let Some(param_name) = syntax::extract_param_name(&child) else {
                 continue;
             };
             let type_name = child
                 .field("type")
-                .and_then(|t| syntax::extract_type_ref(&t));
+                .and_then(|t| syntax::extract_type_ref(&t))
+                .or_else(|| external_hint.and_then(syntax::extract_type_ref));
             if let Some(class_fields) = ctor_fields.as_deref_mut()
                 && syntax::is_parameter_property(&child)
             {
@@ -299,17 +346,20 @@ impl<'a, 'b> TsMemberExtractor<'a, 'b> {
                         explicit_visibility: syntax::has_explicit_visibility(&child),
                         is_mut_ref: false,
                         conditional_guard: ConditionalGuard::None,
-                        span: self.tree.node_span(&child),
+                        span: self.ctx.tree().node_span(&child),
                     },
                     syntax::has_modifier_token(&child, "readonly"),
                 );
             }
-            params.push(ParamDecl {
+            if let Some(default_val) = child.field("value") {
+                out.default_exprs.push(default_val);
+            }
+            out.params.push(ParamDecl {
                 name: param_name,
                 type_name,
                 access: ParamAccess::Owned,
             });
         }
-        params
+        out
     }
 }

@@ -2,9 +2,85 @@ use super::TsNode;
 use crate::ast::similarity::{AstKind, LitKind, NameSpace};
 use crate::lang::common::{CstNormalizeDialect, CstNormalizer, is_comment_kind};
 
-/// Stage 1: TypeScript CST-to-[`crate::ast::similarity::NormalizedTree`] dialect.
+/// Stage 1: TypeScript/TSX CST-to-[`crate::ast::similarity::NormalizedTree`] dialect.
 #[derive(Default)]
 pub(super) struct TsNormalizeDialect;
+
+impl TsNormalizeDialect {
+    fn visit_jsx(&mut self, norm: &mut CstNormalizer, node: &TsNode<'_>) -> bool {
+        match node.kind().as_ref() {
+            "jsx_element" => {
+                let mark = norm.tb().enter(AstKind::Construct);
+                let open_tag = node.field("open_tag");
+                let close_tag = node.field("close_tag");
+                let open_range = open_tag.as_ref().map(TsNode::range);
+                let close_range = close_tag.as_ref().map(TsNode::range);
+
+                if let Some(open) = open_tag {
+                    if let Some(name) = open.field("name") {
+                        norm.tb().exact(name.text().trim());
+                    } else {
+                        norm.tb().exact("<>");
+                    }
+                    self.walk_jsx_attributes(norm, &open);
+                } else {
+                    norm.tb().exact("<>");
+                }
+
+                for child in node.children() {
+                    let range = Some(child.range());
+                    if range == open_range
+                        || range == close_range
+                        || !child.is_named()
+                        || is_comment_kind(child.kind().as_ref())
+                        || child.kind() == "jsx_closing_element"
+                    {
+                        continue;
+                    }
+                    norm.walk(self, &child);
+                }
+                norm.tb().exit(mark);
+                true
+            }
+            "jsx_self_closing_element" => {
+                let mark = norm.tb().enter(AstKind::Construct);
+                if let Some(name) = node.field("name") {
+                    norm.tb().exact(name.text().trim());
+                }
+                self.walk_jsx_attributes(norm, node);
+                norm.tb().exit(mark);
+                true
+            }
+            "jsx_attribute" => {
+                let mut named = node
+                    .children()
+                    .filter(|c| c.is_named() && !is_comment_kind(c.kind().as_ref()));
+                let attr_name = named.next();
+                let attr_val = named.next();
+                let mark = norm.tb().enter(AstKind::Arg);
+                if let Some(name) = attr_name {
+                    norm.tb().exact(name.text().trim());
+                }
+                if let Some(val) = attr_val {
+                    norm.walk(self, &val);
+                } else {
+                    norm.tb().literal(LitKind::Bool);
+                }
+                norm.tb().exit(mark);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn walk_jsx_attributes(&mut self, norm: &mut CstNormalizer, tag: &TsNode<'_>) {
+        for child in tag.children() {
+            if matches!(child.kind().as_ref(), "jsx_attribute" | "jsx_expression") {
+                norm.walk(self, &child);
+            }
+        }
+    }
+}
 
 impl CstNormalizeDialect for TsNormalizeDialect {
     fn visit_compound(&mut self, norm: &mut CstNormalizer, node: &TsNode<'_>) -> bool {
@@ -13,9 +89,24 @@ impl CstNormalizeDialect for TsNormalizeDialect {
             | "type_annotation"
             | "type_predicate_annotation"
             | "type_arguments"
-            | "type_parameters" => true,
-            "string" => {
+            | "type_parameters"
+            | "jsx_closing_element" => true,
+            "jsx_text" => {
+                if !node.text().trim().is_empty() {
+                    norm.tb().literal(LitKind::String);
+                }
+                true
+            }
+            "html_character_reference" | "string" => {
                 norm.tb().literal(LitKind::String);
+                true
+            }
+            "jsx_expression" => {
+                for child in node.children() {
+                    if child.is_named() && !is_comment_kind(child.kind().as_ref()) {
+                        norm.walk(self, &child);
+                    }
+                }
                 true
             }
             "template_string" => {
@@ -96,6 +187,9 @@ impl CstNormalizeDialect for TsNormalizeDialect {
     }
 
     fn visit_special(&mut self, norm: &mut CstNormalizer, node: &TsNode<'_>) -> bool {
+        if self.visit_jsx(norm, node) {
+            return true;
+        }
         match node.kind().as_ref() {
             "member_expression" => {
                 if let Some(obj) = node.field("object")

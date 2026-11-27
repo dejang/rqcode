@@ -1,19 +1,18 @@
 use super::TsNode;
 use super::coupling;
+use super::expr::{self, PatternReadTarget, TsBodyContext};
+use super::jsx;
 use super::normalize::TsNormalizeDialect;
+use super::props::{self, ExtractedParams};
 use super::syntax;
 use crate::ast::item::{CallKind, CallReceiver, CallSite, FieldAccess, LocalBinding, TypeRef};
-use crate::ast::{ModulePath, SyntaxTree};
 use crate::diagnostic::Span;
 use crate::lang::common::{self, AccessMode, BodyAccumulator, BodyMetadataWalker};
-use std::collections::HashMap;
 
 pub(super) use crate::lang::common::ExtractedBody;
 
 pub(super) struct TsBodyWalker<'a, 'b> {
-    tree: &'a SyntaxTree,
-    base_dir: &'b [String],
-    namespace_imports: &'b HashMap<String, ModulePath>,
+    ctx: &'b TsBodyContext<'a, 'b>,
     acc: BodyAccumulator,
 }
 
@@ -28,26 +27,45 @@ impl<'a> BodyMetadataWalker<'a> for TsBodyWalker<'a, '_> {
 }
 
 impl<'a, 'b> TsBodyWalker<'a, 'b> {
-    pub(super) fn new(
-        tree: &'a SyntaxTree,
-        base_dir: &'b [String],
-        namespace_imports: &'b HashMap<String, ModulePath>,
-    ) -> Self {
+    pub(super) fn new(ctx: &'b TsBodyContext<'a, 'b>) -> Self {
         Self {
-            tree,
-            base_dir,
-            namespace_imports,
+            ctx,
             acc: BodyAccumulator::default(),
         }
     }
 
-    pub(super) fn extract(self, body: Option<TsNode<'a>>) -> ExtractedBody {
+    pub(super) fn extract_with_seeds(
+        mut self,
+        body: Option<TsNode<'a>>,
+        local_bindings: Vec<LocalBinding>,
+        default_exprs: &[TsNode<'a>],
+    ) -> ExtractedBody {
+        for binding in local_bindings {
+            self.acc.push_local_binding(binding);
+        }
+        for default_expr in default_exprs {
+            self.walk(default_expr, AccessMode::Read);
+        }
         common::extract_body_with_dialect(self, TsNormalizeDialect, body)
     }
 
-    fn walk(&mut self, node: &TsNode<'a>, mode: AccessMode) {
-        coupling::TsCouplingInspector::new(self.tree, self.base_dir, self.acc.coupling_mut())
-            .inspect(node);
+    pub(super) fn walk(&mut self, node: &TsNode<'a>, mode: AccessMode) {
+        coupling::TsCouplingInspector::new(
+            self.ctx.tree(),
+            self.ctx.base_dir(),
+            self.ctx.conventions(),
+            self.acc.coupling_mut(),
+        )
+        .inspect(node);
+        if let jsx::JsxWalkResult::Handled(children) =
+            jsx::TsJsxWalker::new(self.ctx.tree(), self.ctx.namespace_imports(), &mut self.acc)
+                .walk_jsx_node(node)
+        {
+            for child in children {
+                self.walk(&child, AccessMode::Read);
+            }
+            return;
+        }
         match node.kind().as_ref() {
             "comment" | "string" => return,
             "assignment_expression" | "augmented_assignment_expression" => {
@@ -97,7 +115,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             }
             "subscript_expression" => {
                 if let Some(index_node) = node.field("index")
-                    && let Some(field_name) = extract_static_string_key(&index_node)
+                    && let Some(field_name) = syntax::extract_static_string_key(&index_node)
                     && let Some(raw_obj) = node.field("object")
                 {
                     self.record_member_or_subscript_access(node, &raw_obj, field_name, mode);
@@ -107,14 +125,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             "new_expression" => self.record_new_expression(node),
             "variable_declarator" => self.record_local_binding(node),
             "required_parameter" | "optional_parameter" => {
-                if let Some(pat) = node.field("pattern")
-                    && pat.kind() == "object_pattern"
-                {
-                    let ty = node
-                        .field("type")
-                        .and_then(|t| syntax::extract_type_ref(&t));
-                    self.record_object_pattern_reads(&pat, "", false, ty.as_ref());
-                }
+                self.record_nested_param_object_pattern(node);
             }
             _ => {}
         }
@@ -126,13 +137,42 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             return;
         }
 
-        let next_mode = if is_ts_transparent_node(node) {
+        let next_mode = if expr::is_ts_transparent_node(node) {
             mode
         } else {
             AccessMode::Read
         };
         for child in node.children() {
             self.walk(&child, next_mode);
+        }
+    }
+
+    fn record_nested_param_object_pattern(&mut self, node: &TsNode<'a>) {
+        let Some(pat) = node.field("pattern") else {
+            return;
+        };
+        if pat.kind() != "object_pattern" {
+            return;
+        }
+        let type_node = node.field("type");
+        let ty = type_node.as_ref().and_then(syntax::extract_type_ref);
+        let read_target = PatternReadTarget {
+            param: "",
+            is_self: false,
+            ty: ty.as_ref(),
+        };
+        self.ctx
+            .collect_object_pattern_reads(&pat, read_target, &mut self.acc);
+        let shape = props::resolve_param_prop_shape(
+            type_node.as_ref(),
+            None,
+            self.ctx.prop_shapes(),
+            self.ctx.conventions(),
+        );
+        let mut extracted = ExtractedParams::default();
+        shape.extract_bindings(&pat, ty.as_ref(), self.ctx.prop_shapes(), &mut extracted);
+        for binding in extracted.local_bindings {
+            self.acc.push_local_binding(binding);
         }
     }
 
@@ -143,7 +183,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
         field_name: String,
         mode: AccessMode,
     ) {
-        let target = unwrap_ts_receiver(raw_obj);
+        let target = expr::unwrap_ts_receiver(raw_obj);
         let (receiver_param, receiver_is_self, receiver_type, direct) = match target.kind().as_ref()
         {
             "this" => (String::new(), true, None, true),
@@ -151,7 +191,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             _ => (
                 String::new(),
                 false,
-                self.infer_expr_origin(&target).0,
+                self.ctx.infer_expr_origin(&target).0,
                 false,
             ),
         };
@@ -162,7 +202,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             field_name,
             is_read: mode.is_read(),
             is_write: mode.is_write(),
-            span: self.tree.node_span(node),
+            span: self.ctx.tree().node_span(node),
         });
         let next = if mode.is_write() && !direct {
             AccessMode::ReadWrite
@@ -190,7 +230,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
         let Some(ctor) = node.field("constructor") else {
             return;
         };
-        if let Some(ty_ref) = extract_ctor_type_ref(&ctor) {
+        if let Some(ty_ref) = expr::extract_ctor_type_ref(&ctor) {
             self.acc.push_constructed_type(ty_ref);
             if ctor.kind() == "member_expression"
                 && let Some(prop) = ctor.field("property")
@@ -210,6 +250,14 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             }
             return;
         }
+        if name_node.kind() == "array_pattern" {
+            if let Some(val) = node.field("value")
+                && let Some(binding) = self.ctx.extract_state_hook_binding(&name_node, &val)
+            {
+                self.acc.push_local_binding(binding);
+            }
+            return;
+        }
         if name_node.kind() != "identifier" {
             return;
         }
@@ -218,71 +266,75 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
             .field("type")
             .and_then(|t| syntax::extract_type_ref(&t));
         if annotated.is_some() {
-            self.acc.push_local_binding(LocalBinding { name, type_name: annotated, init_receiver: None, init_callee: None });
+            self.acc.push_local_binding(LocalBinding {
+                name,
+                type_name: annotated,
+                init_receiver: None,
+                init_callee: None,
+            });
             return;
         }
         if let Some(val) = node.field("value") {
-            let (type_name, init_receiver, init_callee) = self.infer_expr_origin(&val);
+            let (type_name, init_receiver, init_callee) = self.ctx.infer_expr_origin(&val);
             if type_name.is_some() || init_callee.is_some() {
-                self.acc.push_local_binding(LocalBinding { name, type_name, init_receiver, init_callee });
+                self.acc.push_local_binding(LocalBinding {
+                    name,
+                    type_name,
+                    init_receiver,
+                    init_callee,
+                });
             }
         }
     }
 
     fn record_object_destructuring(&mut self, pattern: &TsNode<'a>, val: &TsNode<'a>) {
-        let unwrapped = unwrap_ts_receiver(val);
+        let unwrapped = expr::unwrap_ts_receiver(val);
         let (receiver_param, receiver_is_self, receiver_type) = match unwrapped.kind().as_ref() {
             "this" => (String::new(), true, None),
             "identifier" => (unwrapped.text().into_owned(), false, None),
-            _ => (String::new(), false, self.infer_expr_origin(&unwrapped).0),
+            _ => (
+                String::new(),
+                false,
+                self.ctx.infer_expr_origin(&unwrapped).0,
+            ),
         };
-        self.record_object_pattern_reads(
-            pattern,
-            &receiver_param,
-            receiver_is_self,
-            receiver_type.as_ref(),
-        );
-    }
-
-    fn record_object_pattern_reads(
-        &mut self,
-        pattern: &TsNode<'a>,
-        receiver_param: &str,
-        receiver_is_self: bool,
-        receiver_type: Option<&TypeRef>,
-    ) {
-        for child in pattern.children() {
-            let field_name = match child.kind().as_ref() {
-                "shorthand_property_identifier_pattern" => Some(child.text().into_owned()),
-                "pair_pattern" => child.field("key").and_then(|k| {
-                    extract_static_string_key(&k).or_else(|| Some(k.text().into_owned()))
-                }),
-                _ => None,
-            };
-            if let Some(field_name) = field_name {
-                self.acc.push_field_access(FieldAccess {
-                    receiver_param: receiver_param.to_string(),
-                    receiver_is_self,
-                    receiver_type: receiver_type.cloned(),
-                    field_name,
-                    is_read: true,
-                    is_write: false,
-                    span: self.tree.node_span(&child),
-                });
-            }
-        }
+        let target = PatternReadTarget {
+            param: &receiver_param,
+            is_self: receiver_is_self,
+            ty: receiver_type.as_ref(),
+        };
+        self.ctx
+            .collect_object_pattern_reads(pattern, target, &mut self.acc);
     }
 
     fn record_call(&mut self, call_node: &TsNode<'a>) {
         let Some(func_node) = call_node.field("function") else {
             return;
         };
-        let span = self.tree.node_span(call_node);
-        let arg_receivers = self.extract_arg_receivers(call_node);
+        let span = self.ctx.tree().node_span(call_node);
+        if func_node.kind() == "import" {
+            if let Some(target_mod) = self.ctx.extract_dynamic_import_target(call_node) {
+                self.acc.push_call(CallSite {
+                    kind: CallKind::Scoped,
+                    callee: String::from("default"),
+                    receiver: Some(CallReceiver::Named(target_mod.to_string())),
+                    arg_receivers: Vec::new(),
+                    span,
+                });
+            }
+            return;
+        }
+        let arg_receivers = self.ctx.extract_arg_receivers(call_node);
 
         match func_node.kind().as_ref() {
             "identifier" => {
-                self.acc.push_call(CallSite { kind: CallKind::Free, callee: func_node.text().into_owned(), receiver: None, arg_receivers, span });
+                self.acc.push_call(CallSite {
+                    kind: CallKind::Free,
+                    callee: func_node.text().into_owned(),
+                    receiver: None,
+                    arg_receivers,
+                    span,
+                });
             }
             "member_expression" => {
                 let Some(callee) = func_node
@@ -301,7 +353,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
                 let Some(index_node) = func_node.field("index") else {
                     return;
                 };
-                let Some(callee) = extract_static_string_key(&index_node) else {
+                let Some(callee) = syntax::extract_static_string_key(&index_node) else {
                     return;
                 };
                 let Some(raw_obj) = func_node.field("object") else {
@@ -313,29 +365,6 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
         }
     }
 
-    fn extract_arg_receivers(&self, call_node: &TsNode<'a>) -> Vec<Option<CallReceiver>> {
-        let Some(args) = call_node.field("arguments") else {
-            return Vec::new();
-        };
-        args.children()
-            .filter(TsNode::is_named)
-            .map(|arg| self.extract_expr_receiver(&arg))
-            .collect()
-    }
-
-    fn extract_expr_receiver(&self, node: &TsNode<'a>) -> Option<CallReceiver> {
-        let unwrapped = unwrap_ts_receiver(node);
-        match unwrapped.kind().as_ref() {
-            "this" => Some(CallReceiver::SelfInstance),
-            "identifier" => Some(CallReceiver::Named(unwrapped.text().into_owned())),
-            _ => match self.infer_expr_origin(&unwrapped).0 {
-                Some(TypeRef::SelfType) => Some(CallReceiver::SelfType),
-                Some(TypeRef::Named(name)) => Some(CallReceiver::Named(name)),
-                None => None,
-            },
-        }
-    }
-
     fn record_member_call(
         &mut self,
         raw_obj: &TsNode<'a>,
@@ -343,7 +372,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
         arg_receivers: Vec<Option<CallReceiver>>,
         span: Span,
     ) {
-        let obj = unwrap_ts_receiver(raw_obj);
+        let obj = expr::unwrap_ts_receiver(raw_obj);
 
         match obj.kind().as_ref() {
             "this" => self.acc.push_call(CallSite {
@@ -358,7 +387,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
                 self.record_nested_member_call(&obj, callee, arg_receivers, span);
             }
             _ => {
-                let receiver = if let (Some(ty), _, _) = self.infer_expr_origin(&obj) {
+                let receiver = if let (Some(ty), _, _) = self.ctx.infer_expr_origin(&obj) {
                     match ty {
                         TypeRef::SelfType => CallReceiver::SelfType,
                         TypeRef::Named(name) => CallReceiver::Named(name),
@@ -366,7 +395,13 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
                 } else {
                     CallReceiver::Named(obj.text().into_owned())
                 };
-                self.acc.push_call(CallSite { kind: CallKind::Method, callee, receiver: Some(receiver), arg_receivers, span });
+                self.acc.push_call(CallSite {
+                    kind: CallKind::Method,
+                    callee,
+                    receiver: Some(receiver),
+                    arg_receivers,
+                    span,
+                });
             }
         }
     }
@@ -379,7 +414,7 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
         span: Span,
     ) {
         let obj_name = obj.text().into_owned();
-        if let Some(ns_mod) = self.namespace_imports.get(&obj_name) {
+        if let Some(ns_mod) = self.ctx.namespace_imports().get(&obj_name) {
             self.acc.record_scoped_type_call(
                 CallReceiver::Named(ns_mod.to_string()),
                 None,
@@ -443,148 +478,5 @@ impl<'a, 'b> TsBodyWalker<'a, 'b> {
                 span,
             });
         }
-    }
-
-    fn infer_expr_origin(
-        &self,
-        node: &TsNode<'_>,
-    ) -> (Option<TypeRef>, Option<CallReceiver>, Option<String>) {
-        match node.kind().as_ref() {
-            "parenthesized_expression"
-            | "await_expression"
-            | "non_null_expression"
-            | "satisfies_expression" => node
-                .children()
-                .find(TsNode::is_named)
-                .map_or((None, None, None), |c| self.infer_expr_origin(&c)),
-            "as_expression" => {
-                let mut named = node.children().filter(TsNode::is_named);
-                let expr = named.next();
-                let ty = named.next().and_then(|t| syntax::extract_type_ref(&t));
-                if ty.is_some() {
-                    (ty, None, None)
-                } else {
-                    expr.map_or((None, None, None), |e| self.infer_expr_origin(&e))
-                }
-            }
-            "new_expression" => {
-                let ty = node
-                    .field("constructor")
-                    .and_then(|c| extract_ctor_type_ref(&c));
-                (ty, None, None)
-            }
-            "call_expression" => {
-                let Some(func_node) = node.field("function") else {
-                    return (None, None, None);
-                };
-                match func_node.kind().as_ref() {
-                    "identifier" => (None, None, Some(func_node.text().into_owned())),
-                    "member_expression" => {
-                        let Some(obj) = func_node.field("object") else {
-                            return (None, None, None);
-                        };
-                        let callee = func_node
-                            .field("property")
-                            .map(|p| p.text().into_owned())
-                            .unwrap_or_default();
-                        if obj.kind() == "identifier" {
-                            let obj_text = obj.text();
-                            if obj_text
-                                .chars()
-                                .next()
-                                .is_some_and(|c| c.is_ascii_uppercase())
-                            {
-                                return (Some(TypeRef::Named(obj_text.into_owned())), None, None);
-                            }
-                            if !callee.is_empty()
-                                && self.namespace_imports.contains_key(obj_text.as_ref())
-                            {
-                                return (None, None, Some(callee));
-                            }
-                            if !callee.is_empty() {
-                                return (
-                                    None,
-                                    Some(CallReceiver::Named(obj_text.into_owned())),
-                                    Some(callee),
-                                );
-                            }
-                            return (None, None, None);
-                        }
-                        if obj.kind() == "this" && !callee.is_empty() {
-                            return (None, Some(CallReceiver::SelfInstance), Some(callee));
-                        }
-                        if obj.kind() == "member_expression"
-                            && let Some(prop) = obj.field("property")
-                            && prop
-                                .text()
-                                .chars()
-                                .next()
-                                .is_some_and(|c| c.is_ascii_uppercase())
-                            && let Some(ty) = extract_ctor_type_ref(&obj)
-                        {
-                            return (Some(ty), None, None);
-                        }
-                        (None, None, None)
-                    }
-                    _ => (None, None, None),
-                }
-            }
-            _ => (None, None, None),
-        }
-    }
-}
-
-fn is_ts_transparent_node(node: &TsNode<'_>) -> bool {
-    matches!(
-        node.kind().as_ref(),
-        "parenthesized_expression"
-            | "non_null_expression"
-            | "satisfies_expression"
-            | "await_expression"
-    ) || (node.kind() == "as_expression"
-        && node
-            .children()
-            .filter(TsNode::is_named)
-            .nth(1)
-            .and_then(|t| syntax::extract_type_ref(&t))
-            .is_none())
-}
-
-fn unwrap_ts_receiver<'a>(node: &TsNode<'a>) -> TsNode<'a> {
-    let mut cur = node.clone();
-    while is_ts_transparent_node(&cur) {
-        let Some(inner) = cur
-            .children()
-            .find(|c| c.is_named() && !common::is_comment_kind(c.kind().as_ref()))
-        else {
-            break;
-        };
-        cur = inner;
-    }
-    cur
-}
-
-fn extract_static_string_key(node: &TsNode<'_>) -> Option<String> {
-    match node.kind().as_ref() {
-        "string" => {
-            let unquoted = syntax::unquote_string(&node.text());
-            (!unquoted.is_empty()).then_some(unquoted)
-        }
-        "template_string" => {
-            if node.children().any(|c| c.kind() == "template_substitution") {
-                return None;
-            }
-            let unquoted = syntax::unquote_string(&node.text());
-            (!unquoted.is_empty()).then_some(unquoted)
-        }
-        _ => None,
-    }
-}
-
-fn extract_ctor_type_ref(ctor: &TsNode<'_>) -> Option<TypeRef> {
-    match ctor.kind().as_ref() {
-        "identifier" => Some(TypeRef::Named(ctor.text().into_owned())),
-        "member_expression" => syntax::join_dotted_path(&ctor.text()).map(TypeRef::Named),
-        _ => None,
     }
 }

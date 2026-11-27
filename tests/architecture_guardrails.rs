@@ -73,11 +73,11 @@ impl LanguageFrontend for CustomScriptFrontend {
     }
 
     fn module_path(&self, root: &Path, relative_path: &Path) -> ModulePath {
-        TypeScriptFrontend.module_path(root, &relative_path.with_extension("ts"))
+        TypeScriptFrontend::new().module_path(root, &relative_path.with_extension("ts"))
     }
 
     fn file_role(&self, relative_path: &Path) -> FileRole {
-        TypeScriptFrontend.file_role(&relative_path.with_extension("ts"))
+        TypeScriptFrontend::new().file_role(&relative_path.with_extension("ts"))
     }
 
     fn extract_module(
@@ -86,7 +86,7 @@ impl LanguageFrontend for CustomScriptFrontend {
         module_path: ModulePath,
         role: FileRole,
     ) -> FileAst {
-        TypeScriptFrontend.extract_module(tree, module_path, role)
+        TypeScriptFrontend::new().extract_module(tree, module_path, role)
     }
 }
 

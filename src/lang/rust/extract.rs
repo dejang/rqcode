@@ -51,7 +51,7 @@ impl<'a> RustExtractor<'a> {
             path: self.tree.path().to_path_buf(),
             relative_path: self.tree.relative_path().to_path_buf(),
             module_path: self.module_path,
-            language: self.tree.language_id(),
+            language: self.tree.semantic_language_id(),
             member_separator: self.tree.language().member_separator(),
             role,
             barrel_kind: BarrelKind::None,
